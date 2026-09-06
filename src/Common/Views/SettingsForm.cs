@@ -1778,7 +1778,9 @@ public sealed class SettingsForm : Form
 
         _directoryColumnsGrid.ClearSelection();
         row.Selected = true;
-        _directoryColumnsGrid.CurrentCell = row.Cells["Header"];
+        // 不在菜单点击处理器内设置 CurrentCell：EditOnEnter 模式下会立即尝试进入编辑，
+        // 而此时焦点仍在菜单上，DataGridView 内部重入会抛出 rowIndex 越界异常并破坏编辑状态。
+        // 用户单击单元格时 EditOnEnter 会自动进入编辑，无需在此主动定位。
         UpdateDirectoryPreview();
     }
 
