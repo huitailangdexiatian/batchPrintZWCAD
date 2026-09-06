@@ -35,6 +35,10 @@ public sealed class DirectoryColumnSetting
     public bool Enabled { get; set; }
     public bool Centered { get; set; } = true;
     public double Width { get; set; }
+    /// <summary>是否为自定义行；自定义行的目录列名与自定义内容均可由用户编辑。</summary>
+    public bool IsCustom { get; set; }
+    /// <summary>自定义行的内容文本；生成目录时该列所有行都填充此内容。</summary>
+    public string CustomText { get; set; } = "";
 
     public DirectoryColumnSetting Clone()
     {
@@ -44,7 +48,9 @@ public sealed class DirectoryColumnSetting
             Header = Header,
             Enabled = Enabled,
             Centered = Centered,
-            Width = Width
+            Width = Width,
+            IsCustom = IsCustom,
+            CustomText = CustomText
         };
     }
 }
@@ -377,7 +383,37 @@ public static class AppSettingsStore
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var column in settings.DirectoryColumns)
         {
-            if (column == null || !defaultByKey.TryGetValue(column.Key ?? "", out var fallback) || !seen.Add(fallback.Key))
+            if (column == null)
+            {
+                continue;
+            }
+
+            if (column.IsCustom)
+            {
+                // 自定义行不属于预置字段，独立保留，只为没有合法键的行补一个唯一键。
+                if (!string.IsNullOrWhiteSpace(column.Header))
+                {
+                    var key = column.Key ?? "";
+                    if (string.IsNullOrWhiteSpace(key) || !seen.Add(key))
+                    {
+                        key = CreateUniqueCustomKey(normalized);
+                    }
+                    seen.Add(key);
+                    normalized.Add(new DirectoryColumnSetting
+                    {
+                        Key = key,
+                        Header = column.Header.Trim(),
+                        Enabled = column.Enabled,
+                        Centered = column.Centered,
+                        Width = column.Width > 0 ? column.Width : Math.Max(1, settings.DirectoryRemarkWidth),
+                        IsCustom = true,
+                        CustomText = column.CustomText ?? ""
+                    });
+                }
+                continue;
+            }
+
+            if (!defaultByKey.TryGetValue(column.Key ?? "", out var fallback) || !seen.Add(fallback.Key))
             {
                 continue;
             }
@@ -401,6 +437,23 @@ public static class AppSettingsStore
         }
 
         return normalized;
+    }
+
+    private static string CreateUniqueCustomKey(IEnumerable<DirectoryColumnSetting> existing)
+    {
+        var maxIndex = 0;
+        foreach (var column in existing)
+        {
+            if (!column.IsCustom || string.IsNullOrWhiteSpace(column.Key))
+            {
+                continue;
+            }
+            if (int.TryParse(column.Key.AsSpan("Custom".Length), out var index))
+            {
+                maxIndex = Math.Max(maxIndex, index);
+            }
+        }
+        return $"Custom{maxIndex + 1}";
     }
 
     private static List<DirectoryColumnSetting> CreateDefaultDirectoryColumns(AppSettings settings)

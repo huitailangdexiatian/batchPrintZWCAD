@@ -291,6 +291,14 @@ public static class DirectoryTableGenerator
 
     private static string GetColumnValue(string key, PlotJob job, int rowIndex, AppSettings settings)
     {
+        // 自定义行：该列所有行都填充配置好的自定义内容，不进入预置字段取值。
+        var custom = (settings.DirectoryColumns ?? new List<DirectoryColumnSetting>())
+            .FirstOrDefault(x => x.IsCustom && string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase));
+        if (custom != null)
+        {
+            return custom.CustomText ?? "";
+        }
+
         // 这里的字段键与 TitleBlockScanner 写入 PlotJob 的识别结果保持一一对应。
         return key switch
         {

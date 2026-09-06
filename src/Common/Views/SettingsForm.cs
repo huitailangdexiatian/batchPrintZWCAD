@@ -54,6 +54,9 @@ public sealed class SettingsForm : Form
     private int _directoryDragRow = -1;
     private bool _directoryDragActive;
     private Point _directoryDragAnchor;
+    // 目录内容行右键菜单：插入/删除自定义行。
+    private readonly ContextMenuStrip _directoryColumnsMenu = new();
+    private int _directoryContextRow = -1;
 
     // 文件名设置
     private readonly TextBox _fileNamePattern = new();
@@ -1319,6 +1322,17 @@ public sealed class SettingsForm : Form
         _directoryColumnsGrid.MouseDown += DirectoryColumnsGridMouseDown;
         _directoryColumnsGrid.MouseMove += DirectoryColumnsGridMouseMove;
         _directoryColumnsGrid.MouseUp += DirectoryColumnsGridMouseUp;
+        _directoryColumnsGrid.CellBeginEdit += DirectoryColumnsGridCellBeginEdit;
+        _directoryColumnsGrid.ContextMenuStrip = _directoryColumnsMenu;
+        if (_directoryColumnsMenu.Items.Count == 0)
+        {
+            _directoryColumnsMenu.Items.Add("向上插入自定义行", null, (_, _) =>
+                InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow : 0));
+            _directoryColumnsMenu.Items.Add("向下插入自定义行", null, (_, _) =>
+                InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow + 1 : _directoryColumnsGrid.Rows.Count));
+            _directoryColumnsMenu.Items.Add(new ToolStripSeparator());
+            _directoryColumnsMenu.Items.Add("删除自定义行", null, (_, _) => DeleteDirectoryRow(_directoryContextRow));
+        }
 
         _directoryColumnsGrid.Columns.Add(new DataGridViewCheckBoxColumn
         {
@@ -1336,7 +1350,7 @@ public sealed class SettingsForm : Form
         {
             Name = "Header",
             HeaderText = "目录列名",
-            ReadOnly = true,
+            ReadOnly = false,
             Width = UiLayout.Scale(105)
         });
         _directoryColumnsGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -1368,6 +1382,13 @@ public sealed class SettingsForm : Form
             Text = "下移",
             UseColumnTextForButtonValue = true,
             Width = UiLayout.Scale(56)
+        });
+        // 自定义内容列：仅自定义行可编辑，预置行显示为只读。
+        _directoryColumnsGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "CustomText",
+            HeaderText = "自定义内容",
+            Width = UiLayout.Scale(120)
         });
 
         // 列顺序只允许通过“上移/下移”按钮改变，禁止点击表头触发隐式排序。
@@ -1423,8 +1444,24 @@ public sealed class SettingsForm : Form
     /// </summary>
     private void DirectoryColumnsGridMouseDown(object? sender, MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.Right)
+        {
+            // 右键仅用于定位自定义行菜单的操作目标，不影响左键拖拽。
+            var hitRight = _directoryColumnsGrid.HitTest(e.X, e.Y);
+            _directoryContextRow = (hitRight.RowIndex >= 0 && hitRight.RowIndex < _directoryColumnsGrid.Rows.Count)
+                ? hitRight.RowIndex
+                : -1;
+            if (_directoryContextRow >= 0)
+            {
+                _directoryColumnsGrid.ClearSelection();
+                _directoryColumnsGrid.Rows[_directoryContextRow].Selected = true;
+            }
+            return;
+        }
+
         if (e.Button != MouseButtons.Left)
         {
+            _directoryDragRow = -1;
             return;
         }
 
@@ -1525,6 +1562,81 @@ public sealed class SettingsForm : Form
         {
             _directoryColumnsGrid.Cursor = Cursors.Default;
         }
+    }
+
+    /// <summary>目录列名/自定义内容仅允许自定义行编辑，预置行的这两列在开始编辑时被取消。</summary>
+    private void DirectoryColumnsGridCellBeginEdit(object? sender, DataGridViewCellCancelEventArgs e)
+    {
+        var column = _directoryColumnsGrid.Columns[e.ColumnIndex];
+        if (column == null || (column.Name != "Header" && column.Name != "CustomText"))
+        {
+            return;
+        }
+        if (e.RowIndex < 0 || e.RowIndex >= _directoryColumnsGrid.Rows.Count)
+        {
+            return;
+        }
+        if (!IsCustomRow(_directoryColumnsGrid.Rows[e.RowIndex]))
+        {
+            e.Cancel = true;
+        }
+    }
+
+    private static bool IsCustomRow(DataGridViewRow row)
+    {
+        return row.Tag is string key
+            && key.StartsWith("Custom", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string NextCustomColumnKey()
+    {
+        var maxIndex = 0;
+        foreach (DataGridViewRow row in _directoryColumnsGrid.Rows)
+        {
+            var tag = row.Tag?.ToString() ?? "";
+            if (!tag.StartsWith("Custom", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (int.TryParse(tag.AsSpan("Custom".Length), out var index))
+            {
+                maxIndex = Math.Max(maxIndex, index);
+            }
+        }
+        return $"Custom{maxIndex + 1}";
+    }
+
+    /// <summary>在指定位置插入一个新的自定义行；新行列名、内容均可编辑，默认启用。</summary>
+    private void InsertCustomRow(int insertIndex)
+    {
+        _directoryColumnsGrid.EndEdit();
+        insertIndex = Math.Max(0, Math.Min(insertIndex, _directoryColumnsGrid.Rows.Count));
+
+        var row = new DataGridViewRow();
+        row.CreateCells(_directoryColumnsGrid);
+        row.Cells["Enabled"].Value = true;
+        row.Cells["Centered"].Value = false;
+        row.Cells["Header"].Value = "自定义";
+        row.Cells["Width"].Value = "2000";
+        row.Cells["CustomText"].Value = "";
+        row.Tag = NextCustomColumnKey();
+        _directoryColumnsGrid.Rows.Insert(insertIndex, row);
+
+        _directoryColumnsGrid.ClearSelection();
+        row.Selected = true;
+        _directoryColumnsGrid.CurrentCell = row.Cells["Header"];
+        UpdateDirectoryPreview();
+    }
+
+    private void DeleteDirectoryRow(int rowIndex)
+    {
+        if (rowIndex < 0 || rowIndex >= _directoryColumnsGrid.Rows.Count)
+        {
+            return;
+        }
+        _directoryColumnsGrid.EndEdit();
+        _directoryColumnsGrid.Rows.RemoveAt(rowIndex);
+        UpdateDirectoryPreview();
     }
 
     private static TableLayoutPanel CreateSettingsTable(int rows)
@@ -1668,7 +1780,12 @@ public sealed class SettingsForm : Form
                 column.Centered,
                 column.Header,
                 column.Width.ToString("0.##", CultureInfo.CurrentCulture));
-            _directoryColumnsGrid.Rows[rowIndex].Tag = column.Key;
+            var row = _directoryColumnsGrid.Rows[rowIndex];
+            if (column.IsCustom && !string.IsNullOrEmpty(column.CustomText))
+            {
+                row.Cells["CustomText"].Value = column.CustomText;
+            }
+            row.Tag = column.Key;
         }
         UpdateDirectoryPreview();
     }
@@ -1868,7 +1985,9 @@ public sealed class SettingsForm : Form
                 Header = header,
                 Enabled = Convert.ToBoolean(row.Cells["Enabled"].Value ?? false),
                 Centered = Convert.ToBoolean(row.Cells["Centered"].Value ?? false),
-                Width = width
+                Width = width,
+                IsCustom = IsCustomRow(row),
+                CustomText = row.Cells["CustomText"].Value?.ToString()?.Trim() ?? ""
             });
         }
 
