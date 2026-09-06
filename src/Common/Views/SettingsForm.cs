@@ -1477,16 +1477,12 @@ public sealed class SettingsForm : Form
         _directoryColumnsGrid.ContextMenuStrip = _directoryColumnsMenu;
         if (_directoryColumnsMenu.Items.Count == 0)
         {
-            // 菜单 Click 在 ContextMenuStrip 关闭过程中同步触发；此时网格（EditOnEnter）仍保留
-            // 编辑会话，同步插行/删行会让网格用过期行号恢复编辑状态而抛 rowIndex 越界。
-            // 因此全部动作延迟到菜单完全关闭、消息队列排空后再执行。
             _directoryColumnsMenu.Items.Add("向上插入自定义行", null, (_, _) =>
-                BeginInvoke(() => InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow : 0)));
+                InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow : 0));
             _directoryColumnsMenu.Items.Add("向下插入自定义行", null, (_, _) =>
-                BeginInvoke(() => InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow + 1 : _directoryColumnsGrid.Rows.Count)));
+                InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow + 1 : _directoryColumnsGrid.Rows.Count));
             _directoryColumnsMenu.Items.Add(new ToolStripSeparator());
-            _directoryColumnsMenu.Items.Add("删除自定义行", null, (_, _) =>
-                BeginInvoke(() => DeleteDirectoryRow(_directoryContextRow)));
+            _directoryColumnsMenu.Items.Add("删除自定义行", null, (_, _) => DeleteDirectoryRow(_directoryContextRow));
         }
 
         _directoryColumnsGrid.Columns.Add(new DataGridViewCheckBoxColumn
@@ -1766,9 +1762,6 @@ public sealed class SettingsForm : Form
     private void InsertCustomRow(int insertIndex)
     {
         _directoryColumnsGrid.EndEdit();
-        // 清空当前单元格以彻底退出编辑会话；否则插行时网格仍持有编辑地址，
-        // EditOnEnter 模式下会尝试恢复并引用过期行号。
-        _directoryColumnsGrid.CurrentCell = null;
         insertIndex = Math.Max(0, Math.Min(insertIndex, _directoryColumnsGrid.Rows.Count));
 
         var row = new DataGridViewRow();
@@ -1798,8 +1791,6 @@ public sealed class SettingsForm : Form
             return;
         }
         _directoryColumnsGrid.EndEdit();
-        // 与插入自定义行一致：删行前彻底退出编辑会话，避免网格用过期行号恢复编辑状态。
-        _directoryColumnsGrid.CurrentCell = null;
         _directoryColumnsGrid.Rows.RemoveAt(rowIndex);
         UpdateDirectoryPreview();
     }
