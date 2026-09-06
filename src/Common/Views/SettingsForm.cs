@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.Linq;
 using System.Windows.Forms;
+using System.Windows.Forms.Integration;
 #if AUTOCAD
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -39,24 +39,8 @@ public sealed class SettingsForm : Form
     private readonly CheckBox _generatePrintLog = new();
     private readonly CheckBox _plotTransparency = new();
     private readonly CheckBox _convertTextToGeometryWhenPlotting = new();
-    private readonly ComboBox _directoryColorIndex = new();
-    private readonly NumericUpDown _directoryTextHeight = new();
-    private readonly NumericUpDown _directoryTextWidthFactor = new();
-    private readonly NumericUpDown _directoryRowHeight = new();
-    private readonly ComboBox _directoryTextStyle = new();
-    private readonly TextBox _directoryLayerName = new();
-    private readonly CheckBox _directoryDrawHeader = new();
-    private readonly CheckBox _directoryDrawGridLines = new();
-    private readonly DataGridView _directoryColumnsGrid = new();
-    private readonly DirectoryPreviewControl _directoryOrderPreview = new();
-
-    // 目录内容行拖拽排序的状态：整行跟随 + 高亮，位移超过阈值才进入拖拽，避免误触编辑/点击。
-    private int _directoryDragRow = -1;
-    private bool _directoryDragActive;
-    private Point _directoryDragAnchor;
-    // 目录内容行右键菜单：插入/删除自定义行。
-    private readonly ContextMenuStrip _directoryColumnsMenu = new();
-    private int _directoryContextRow = -1;
+    // 目录设置页：WinForms 壳内嵌 WPF 控件（ElementHost），行数据与编辑状态彻底解耦。
+    private DirectorySettingsControl _directoryControl = null!;
 
     // 文件名设置
     private readonly TextBox _fileNamePattern = new();
@@ -1121,678 +1105,24 @@ public sealed class SettingsForm : Form
     private TabPage BuildDirectoryTab()
     {
         var page = new TabPage("图纸目录") { Padding = new Padding(UiLayout.Scale(5)) };
-        var root = new TableLayoutPanel
+
+        // 目录设置页整体 WPF 化：ElementHost 承载 DirectorySettingsControl。
+        // 行插入/删除/拖拽均为 ObservableCollection 数据操作，不存在 DataGridView 的
+        // 编辑会话与行号恢复问题（旧版右键插入自定义行反复抛 rowIndex 越界的根源）。
+        WpfBootstrapper.EnsureInitialized();
+        _directoryControl = new DirectorySettingsControl();
+        _directoryControl.PickColumnWidthRequested += RequestColumnWidthFromCad;
+        _directoryControl.PickRowHeightRequested += RequestRowHeightFromCad;
+        _directoryControl.PickTextAppearanceRequested += RequestTextAppearanceFromCad;
+        _directoryControl.SetTextStyleNames(LoadTextStyles());
+
+        var host = new ElementHost
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2
+            Child = _directoryControl
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(142)));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        ConfigureDirectoryColorIndex();
-        ConfigureNumber(_directoryTextHeight, 1, 1000000, 10, 2);
-        ConfigureNumber(_directoryTextWidthFactor, 0.1M, 10, 0.05M, 2);
-        ConfigureNumber(_directoryRowHeight, 1, 1000000, 10, 2);
-        _directoryTextHeight.ValueChanged += (_, _) => UpdateDirectoryPreview();
-        _directoryTextWidthFactor.ValueChanged += (_, _) => UpdateDirectoryPreview();
-        _directoryRowHeight.ValueChanged += (_, _) => UpdateDirectoryPreview();
-        _directoryTextStyle.DropDownStyle = ComboBoxStyle.DropDownList;
-        // 与“颜色索引”一致使用 OwnerDrawFixed：普通 ComboBox 高度由字体决定且不可改，
-        // 同行的文本框/数字框又是另一套默认高度，导致一排输入框高矮不一。
-        _directoryTextStyle.DrawMode = DrawMode.OwnerDrawFixed;
-        _directoryTextStyle.ItemHeight = UiLayout.Scale(13);
-        _directoryTextStyle.DrawItem += DrawDirectoryTextStyle;
-        _directoryTextStyle.SelectedIndexChanged += (_, _) => UpdateDirectoryPreview();
-        LoadTextStyles();
-
-        var parameterGroup = new GroupBox
-        {
-            Text = "目录字体及绘制相关设置",
-            Dock = DockStyle.Fill,
-            Padding = new Padding(UiLayout.Scale(6))
-        };
-        var parameters = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 6,
-            RowCount = 2
-        };
-        for (var i = 0; i < 6; i++)
-        {
-            parameters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 16.666F));
-        }
-        parameters.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(88)));
-        parameters.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(28)));
-
-        var pickTextAppearance = UiLayout.CreateButton("点选目录文字", 108);
-        pickTextAppearance.Margin = new Padding(0, UiLayout.Scale(2), 0, 0);
-        pickTextAppearance.Click += (_, _) => RequestTextAppearanceFromCad();
-        var pickTextTip = new ToolTip();
-        pickTextTip.SetToolTip(
-            pickTextAppearance,
-            "在当前活动图纸中点选文字，自动读取颜色、字高、宽度因子、文字样式和图层。");
-
-        parameters.Controls.Add(
-            BuildDirectoryParameter("颜色索引", _directoryColorIndex, pickTextAppearance),
-            0,
-            0);
-        parameters.Controls.Add(BuildDirectoryParameter("文字高度", _directoryTextHeight), 1, 0);
-        parameters.Controls.Add(BuildDirectoryParameter("宽度因子", _directoryTextWidthFactor), 2, 0);
-        parameters.Controls.Add(BuildDirectoryParameter("文字样式", _directoryTextStyle), 3, 0);
-        parameters.Controls.Add(BuildDirectoryParameter("图层名称", _directoryLayerName), 4, 0);
-        parameters.Controls.Add(BuildDirectoryRowHeightParameter(), 5, 0);
-
-        _directoryDrawHeader.Text = "绘制目录表头";
-        _directoryDrawHeader.AutoSize = true;
-        _directoryDrawGridLines.Text = "绘制目录框线";
-        _directoryDrawGridLines.AutoSize = true;
-        var drawOptions = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
-            WrapContents = false
-        };
-        drawOptions.Controls.Add(_directoryDrawHeader);
-        drawOptions.Controls.Add(_directoryDrawGridLines);
-        parameters.Controls.Add(drawOptions, 0, 1);
-        parameters.SetColumnSpan(drawOptions, 6);
-        parameterGroup.Controls.Add(parameters);
-
-        var contentGroup = new GroupBox
-        {
-            Text = "目录内容设置",
-            Dock = DockStyle.Fill,
-            Padding = new Padding(UiLayout.Scale(6))
-        };
-        ConfigureDirectoryColumnsGrid();
-        var contentLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3
-        };
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(19)));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(76)));
-        contentLayout.Controls.Add(_directoryColumnsGrid, 0, 0);
-        contentLayout.Controls.Add(new Label
-        {
-            Text = "顺序预览（按实际列宽、行高和字高等比例缩放）",
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.BottomLeft,
-            ForeColor = Color.DimGray
-        }, 0, 1);
-        contentLayout.Controls.Add(_directoryOrderPreview, 0, 2);
-        contentGroup.Controls.Add(contentLayout);
-
-        root.Controls.Add(parameterGroup, 0, 0);
-        root.Controls.Add(contentGroup, 0, 1);
-        page.Controls.Add(root);
+        page.Controls.Add(host);
         return page;
-    }
-
-    private static Control BuildDirectoryParameter(string label, Control input, Control? trailingControl = null)
-    {
-        // 输入框统一使用固有高度（约 19px）：NumericUpDown 和普通 ComboBox 的高度由字体锁定，
-        // 无法拉伸，因此两个下拉框用 OwnerDrawFixed + ItemHeight 压到同一高度。
-        // 不能简单地 AutoSize=false + Dock=Fill：TableLayoutPanel 会把多余高度全部分配给
-        // 最后一行，文本框会被撑到整行剩余高度。
-        input.Dock = DockStyle.None;
-        input.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        input.Margin = new Padding(0, UiLayout.Scale(2), UiLayout.Scale(4), 0);
-        var panel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            Margin = Padding.Empty
-        };
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(20)));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(26)));
-        // 余量行吸收多余空间，避免输入行被 WinForms 拉高。
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        panel.Controls.Add(new Label
-        {
-            Text = label,
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.BottomLeft
-        }, 0, 0);
-        panel.Controls.Add(input, 0, 1);
-        if (trailingControl != null)
-        {
-            trailingControl.Dock = DockStyle.None;
-            trailingControl.Anchor = AnchorStyles.Left;
-            panel.Controls.Add(trailingControl, 0, 2);
-        }
-        return panel;
-    }
-
-    private Control BuildDirectoryRowHeightParameter()
-    {
-        _directoryRowHeight.Dock = DockStyle.None;
-        _directoryRowHeight.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        _directoryRowHeight.Margin = new Padding(0, UiLayout.Scale(2), UiLayout.Scale(4), 0);
-        var pickHeight = UiLayout.CreateButton("图中交互", 68);
-        pickHeight.Margin = new Padding(0, UiLayout.Scale(2), 0, 0);
-        pickHeight.Enabled = GetActiveDocument() != null;
-        pickHeight.Click += (_, _) => RequestRowHeightFromCad();
-
-        var panel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 4,
-            Margin = Padding.Empty
-        };
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(20)));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(26)));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(27)));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        panel.Controls.Add(new Label
-        {
-            Text = "目录行高",
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.BottomLeft
-        }, 0, 0);
-        panel.Controls.Add(_directoryRowHeight, 0, 1);
-        panel.Controls.Add(pickHeight, 0, 2);
-        return panel;
-    }
-
-    private void ConfigureDirectoryColorIndex()
-    {
-        _directoryColorIndex.DropDownStyle = ComboBoxStyle.DropDownList;
-        _directoryColorIndex.DrawMode = DrawMode.OwnerDrawFixed;
-        _directoryColorIndex.ItemHeight = UiLayout.Scale(13);
-        _directoryColorIndex.MaxDropDownItems = 14;
-        _directoryColorIndex.IntegralHeight = false;
-        _directoryColorIndex.DropDownHeight = UiLayout.Scale(282);
-        _directoryColorIndex.DrawItem += DrawDirectoryColorIndex;
-        for (var index = 0; index <= 256; index++)
-        {
-            _directoryColorIndex.Items.Add(new DirectoryColorItem(index, GetAciPreviewColor(index)));
-        }
-    }
-
-    private void DrawDirectoryColorIndex(object? sender, DrawItemEventArgs e)
-    {
-        e.DrawBackground();
-        if (e.Index < 0 || e.Index >= _directoryColorIndex.Items.Count
-            || _directoryColorIndex.Items[e.Index] is not DirectoryColorItem item)
-        {
-            return;
-        }
-
-        var swatchSize = Math.Max(UiLayout.Scale(12), e.Bounds.Height - UiLayout.Scale(6));
-        var swatch = new Rectangle(
-            e.Bounds.Left + UiLayout.Scale(3),
-            e.Bounds.Top + (e.Bounds.Height - swatchSize) / 2,
-            swatchSize,
-            swatchSize);
-        using (var brush = new SolidBrush(item.Color))
-        {
-            e.Graphics.FillRectangle(brush, swatch);
-        }
-        e.Graphics.DrawRectangle(Pens.DimGray, swatch);
-
-        var text = item.Index switch
-        {
-            0 => "0（随块）",
-            256 => "256（随层）",
-            _ => item.Index.ToString(CultureInfo.InvariantCulture)
-        };
-        var textColor = (e.State & DrawItemState.Selected) != 0
-            ? SystemColors.HighlightText
-            : SystemColors.ControlText;
-        TextRenderer.DrawText(
-            e.Graphics,
-            text,
-            e.Font ?? Font,
-            new Point(swatch.Right + UiLayout.Scale(5), e.Bounds.Top + (e.Bounds.Height - Font.Height) / 2),
-            textColor);
-        e.DrawFocusRectangle();
-    }
-
-    private void DrawDirectoryTextStyle(object? sender, DrawItemEventArgs e)
-    {
-        e.DrawBackground();
-        if (e.Index >= 0 && e.Index < _directoryTextStyle.Items.Count)
-        {
-            var textColor = (e.State & DrawItemState.Selected) != 0
-                ? SystemColors.HighlightText
-                : SystemColors.ControlText;
-            TextRenderer.DrawText(
-                e.Graphics,
-                _directoryTextStyle.Items[e.Index]?.ToString() ?? string.Empty,
-                e.Font ?? Font,
-                new Rectangle(
-                    e.Bounds.Left + UiLayout.Scale(3),
-                    e.Bounds.Top,
-                    Math.Max(0, e.Bounds.Width - UiLayout.Scale(3)),
-                    e.Bounds.Height),
-                textColor,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        }
-        e.DrawFocusRectangle();
-    }
-
-    private static Color GetAciPreviewColor(int index)
-    {
-        var fixedColors = new[]
-        {
-            Color.DimGray,
-            Color.FromArgb(255, 0, 0),
-            Color.FromArgb(255, 255, 0),
-            Color.FromArgb(0, 255, 0),
-            Color.FromArgb(0, 255, 255),
-            Color.FromArgb(0, 0, 255),
-            Color.FromArgb(255, 0, 255),
-            Color.FromArgb(255, 255, 255),
-            Color.FromArgb(128, 128, 128),
-            Color.FromArgb(192, 192, 192)
-        };
-        if (index >= 0 && index < fixedColors.Length)
-        {
-            return fixedColors[index];
-        }
-
-        if (index >= 10 && index <= 249)
-        {
-            // ACI 10～249 每 10 个索引为一个色相组，偶数为纯色、奇数为同亮度的浅色。
-            var hue = ((index - 10) / 10) * 15.0;
-            var tone = (index - 10) % 10;
-            var brightnessLevels = new[] { 255, 255, 165, 165, 127, 127, 76, 76, 38, 38 };
-            var saturation = tone % 2 == 0 ? 1.0 : 0.5;
-            return ColorFromHsv(hue, saturation, brightnessLevels[tone] / 255.0);
-        }
-
-        var grays = new[] { 51, 80, 105, 130, 190, 255 };
-        if (index >= 250 && index <= 255)
-        {
-            var gray = grays[index - 250];
-            return Color.FromArgb(gray, gray, gray);
-        }
-
-        return Color.DimGray;
-    }
-
-    private static Color ColorFromHsv(double hue, double saturation, double value)
-    {
-        var sector = hue / 60.0;
-        var wholeSector = (int)Math.Floor(sector) % 6;
-        var fraction = sector - Math.Floor(sector);
-        var p = value * (1 - saturation);
-        var q = value * (1 - fraction * saturation);
-        var t = value * (1 - (1 - fraction) * saturation);
-        var (red, green, blue) = wholeSector switch
-        {
-            0 => (value, t, p),
-            1 => (q, value, p),
-            2 => (p, value, t),
-            3 => (p, q, value),
-            4 => (t, p, value),
-            _ => (value, p, q)
-        };
-        return Color.FromArgb(
-            (int)Math.Round(red * 255),
-            (int)Math.Round(green * 255),
-            (int)Math.Round(blue * 255));
-    }
-
-    private sealed class DirectoryColorItem
-    {
-        public int Index { get; }
-        public Color Color { get; }
-
-        public DirectoryColorItem(int index, Color color)
-        {
-            Index = index;
-            Color = color;
-        }
-    }
-
-    private void ConfigureDirectoryColumnsGrid()
-    {
-        UiLayout.StyleGrid(_directoryColumnsGrid, Font);
-        _directoryColumnsGrid.MultiSelect = false;
-        _directoryColumnsGrid.EditMode = DataGridViewEditMode.EditOnEnter;
-        _directoryColumnsGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
-        _directoryColumnsGrid.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
-        _directoryColumnsGrid.CellContentClick += DirectoryColumnsGridCellContentClick;
-        _directoryColumnsGrid.CurrentCellDirtyStateChanged += (_, _) =>
-        {
-            if (_directoryColumnsGrid.IsCurrentCellDirty)
-            {
-                _directoryColumnsGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
-            }
-        };
-        _directoryColumnsGrid.CellValueChanged += (_, _) => UpdateDirectoryPreview();
-        _directoryColumnsGrid.CellEndEdit += (_, _) => UpdateDirectoryPreview();
-        _directoryColumnsGrid.DataError += (_, _) => { };
-        _directoryColumnsGrid.MouseDown += DirectoryColumnsGridMouseDown;
-        _directoryColumnsGrid.MouseMove += DirectoryColumnsGridMouseMove;
-        _directoryColumnsGrid.MouseUp += DirectoryColumnsGridMouseUp;
-        _directoryColumnsGrid.CellBeginEdit += DirectoryColumnsGridCellBeginEdit;
-        _directoryColumnsGrid.ContextMenuStrip = _directoryColumnsMenu;
-        if (_directoryColumnsMenu.Items.Count == 0)
-        {
-            _directoryColumnsMenu.Items.Add("向上插入自定义行", null, (_, _) =>
-                InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow : 0));
-            _directoryColumnsMenu.Items.Add("向下插入自定义行", null, (_, _) =>
-                InsertCustomRow(_directoryContextRow >= 0 ? _directoryContextRow + 1 : _directoryColumnsGrid.Rows.Count));
-            _directoryColumnsMenu.Items.Add(new ToolStripSeparator());
-            _directoryColumnsMenu.Items.Add("删除自定义行", null, (_, _) => DeleteDirectoryRow(_directoryContextRow));
-        }
-
-        _directoryColumnsGrid.Columns.Add(new DataGridViewCheckBoxColumn
-        {
-            Name = "Enabled",
-            HeaderText = "是否启用",
-            Width = UiLayout.Scale(70)
-        });
-        _directoryColumnsGrid.Columns.Add(new DataGridViewCheckBoxColumn
-        {
-            Name = "Centered",
-            HeaderText = "文字居中",
-            Width = UiLayout.Scale(70)
-        });
-        _directoryColumnsGrid.Columns.Add(new DataGridViewTextBoxColumn
-        {
-            Name = "Header",
-            HeaderText = "目录列名",
-            ReadOnly = false,
-            Width = UiLayout.Scale(105)
-        });
-        _directoryColumnsGrid.Columns.Add(new DataGridViewTextBoxColumn
-        {
-            Name = "Width",
-            HeaderText = "目录列宽",
-            Width = UiLayout.Scale(92)
-        });
-        _directoryColumnsGrid.Columns.Add(new DataGridViewButtonColumn
-        {
-            Name = "PickWidth",
-            HeaderText = "设置列宽",
-            Text = "图中交互",
-            UseColumnTextForButtonValue = true,
-            Width = UiLayout.Scale(88)
-        });
-        _directoryColumnsGrid.Columns.Add(new DataGridViewButtonColumn
-        {
-            Name = "MoveUp",
-            HeaderText = "上移",
-            Text = "上移",
-            UseColumnTextForButtonValue = true,
-            Width = UiLayout.Scale(56)
-        });
-        _directoryColumnsGrid.Columns.Add(new DataGridViewButtonColumn
-        {
-            Name = "MoveDown",
-            HeaderText = "下移",
-            Text = "下移",
-            UseColumnTextForButtonValue = true,
-            Width = UiLayout.Scale(56)
-        });
-        // 自定义内容列：仅自定义行可编辑，预置行显示为只读。
-        _directoryColumnsGrid.Columns.Add(new DataGridViewTextBoxColumn
-        {
-            Name = "CustomText",
-            HeaderText = "自定义内容",
-            Width = UiLayout.Scale(120)
-        });
-
-        // 列顺序只允许通过“上移/下移”按钮改变，禁止点击表头触发隐式排序。
-        foreach (DataGridViewColumn column in _directoryColumnsGrid.Columns)
-        {
-            column.SortMode = DataGridViewColumnSortMode.NotSortable;
-        }
-    }
-
-    private void DirectoryColumnsGridCellContentClick(object? sender, DataGridViewCellEventArgs e)
-    {
-        if (e.RowIndex < 0 || e.ColumnIndex < 0)
-        {
-            return;
-        }
-
-        var columnName = _directoryColumnsGrid.Columns[e.ColumnIndex].Name;
-        if (columnName == "PickWidth")
-        {
-            RequestColumnWidthFromCad(e.RowIndex);
-        }
-        else if (columnName == "MoveUp")
-        {
-            MoveDirectoryColumn(e.RowIndex, -1);
-        }
-        else if (columnName == "MoveDown")
-        {
-            MoveDirectoryColumn(e.RowIndex, 1);
-        }
-    }
-
-    private void MoveDirectoryColumn(int rowIndex, int offset)
-    {
-        var targetIndex = rowIndex + offset;
-        if (rowIndex < 0 || targetIndex < 0 || targetIndex >= _directoryColumnsGrid.Rows.Count)
-        {
-            return;
-        }
-
-        // 直接移动整行可同时保留字段键、启用状态、对齐方式、固定列名和用户输入的列宽。
-        var row = _directoryColumnsGrid.Rows[rowIndex];
-        _directoryColumnsGrid.Rows.RemoveAt(rowIndex);
-        _directoryColumnsGrid.Rows.Insert(targetIndex, row);
-        _directoryColumnsGrid.ClearSelection();
-        row.Selected = true;
-        _directoryColumnsGrid.CurrentCell = row.Cells[2];
-        UpdateDirectoryPreview();
-    }
-
-    /// <summary>
-    /// 目录内容行拖拽：仅捕获左键按下，记录起点行与鼠标锚点，尚未位移不视为拖拽。
-    /// 点击在按钮列时交给原有按钮逻辑，不进入拖拽。
-    /// </summary>
-    private void DirectoryColumnsGridMouseDown(object? sender, MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Right)
-        {
-            // 右键仅用于定位自定义行菜单的操作目标，不影响左键拖拽。
-            var hitRight = _directoryColumnsGrid.HitTest(e.X, e.Y);
-            _directoryContextRow = (hitRight.RowIndex >= 0 && hitRight.RowIndex < _directoryColumnsGrid.Rows.Count)
-                ? hitRight.RowIndex
-                : -1;
-            if (_directoryContextRow >= 0)
-            {
-                _directoryColumnsGrid.ClearSelection();
-                _directoryColumnsGrid.Rows[_directoryContextRow].Selected = true;
-            }
-            return;
-        }
-
-        if (e.Button != MouseButtons.Left)
-        {
-            _directoryDragRow = -1;
-            return;
-        }
-
-        var hit = _directoryColumnsGrid.HitTest(e.X, e.Y);
-        if (hit.RowIndex < 0
-            || hit.RowIndex >= _directoryColumnsGrid.Rows.Count
-            || hit.ColumnIndex < 0
-            || _directoryColumnsGrid.Columns[hit.ColumnIndex] is DataGridViewButtonColumn)
-        {
-            _directoryDragRow = -1;
-            return;
-        }
-
-        _directoryDragRow = hit.RowIndex;
-        _directoryDragAnchor = new Point(e.X, e.Y);
-        _directoryDragActive = false;
-    }
-
-    /// <summary>
-    /// 拖拽跟随：位移超过系统拖拽阈值后进入拖拽，之后把被拖行实时交换到鼠标所在行，
-    /// 实现“整行跟随”预览；松开后落位。使用真实行交换按行居中跟随，避免来回振荡。
-    /// </summary>
-    private void DirectoryColumnsGridMouseMove(object? sender, MouseEventArgs e)
-    {
-        if (_directoryDragRow < 0)
-        {
-            return;
-        }
-
-        if (!_directoryDragActive)
-        {
-            var dx = Math.Abs(e.X - _directoryDragAnchor.X);
-            var dy = Math.Abs(e.Y - _directoryDragAnchor.Y);
-            if (dx < SystemInformation.DragSize.Width && dy < SystemInformation.DragSize.Height)
-            {
-                return;
-            }
-
-            // 进入拖拽：取消编辑与单元格选中，避免复选框/文本编辑干扰，并保持捕获以接收松开发布。
-            _directoryDragActive = true;
-            _directoryColumnsGrid.EndEdit();
-            _directoryColumnsGrid.ClearSelection();
-            _directoryColumnsGrid.Capture = true;
-            _directoryColumnsGrid.Cursor = Cursors.SizeNS;
-        }
-
-        var hit = _directoryColumnsGrid.HitTest(e.X, e.Y);
-        if (hit.RowIndex < 0 || hit.RowIndex >= _directoryColumnsGrid.Rows.Count)
-        {
-            return;
-        }
-
-        var currentRow = _directoryDragRow;
-        if (currentRow < 0 || hit.RowIndex == currentRow)
-        {
-            return;
-        }
-
-        // 复用行移动逻辑做实时预览；交换后被拖行本身会落到鼠标所在行，下一次判定自然稳定。
-        var row = _directoryColumnsGrid.Rows[currentRow];
-        _directoryColumnsGrid.Rows.RemoveAt(currentRow);
-        _directoryColumnsGrid.Rows.Insert(hit.RowIndex, row);
-        _directoryDragRow = hit.RowIndex;
-        row.Selected = true; // 拖拽中的高亮以整行选中形式呈现
-    }
-
-    private void DirectoryColumnsGridMouseUp(object? sender, MouseEventArgs e)
-    {
-        if (e.Button != MouseButtons.Left)
-        {
-            return;
-        }
-
-        var wasDrag = _directoryDragActive;
-        var finalRow = _directoryDragRow;
-        EndDirectoryDrag();
-        if (wasDrag)
-        {
-            // 拖拽落位后刷新顺序预览，并保持被拖行高亮以便确认结果。
-            UpdateDirectoryPreview();
-            if (finalRow >= 0
-                && finalRow < _directoryColumnsGrid.Rows.Count)
-            {
-                _directoryColumnsGrid.Rows[finalRow].Selected = true;
-            }
-        }
-    }
-
-    private void EndDirectoryDrag()
-    {
-        _directoryDragRow = -1;
-        _directoryDragActive = false;
-        if (_directoryColumnsGrid.Capture)
-        {
-            _directoryColumnsGrid.Capture = false;
-        }
-        if (_directoryColumnsGrid.Cursor == Cursors.SizeNS)
-        {
-            _directoryColumnsGrid.Cursor = Cursors.Default;
-        }
-    }
-
-    /// <summary>目录列名/自定义内容仅允许自定义行编辑，预置行的这两列在开始编辑时被取消。</summary>
-    private void DirectoryColumnsGridCellBeginEdit(object? sender, DataGridViewCellCancelEventArgs e)
-    {
-        var column = _directoryColumnsGrid.Columns[e.ColumnIndex];
-        if (column == null || (column.Name != "Header" && column.Name != "CustomText"))
-        {
-            return;
-        }
-        if (e.RowIndex < 0 || e.RowIndex >= _directoryColumnsGrid.Rows.Count)
-        {
-            return;
-        }
-        if (!IsCustomRow(_directoryColumnsGrid.Rows[e.RowIndex]))
-        {
-            e.Cancel = true;
-        }
-    }
-
-    private static bool IsCustomRow(DataGridViewRow row)
-    {
-        return row.Tag is string key
-            && key.StartsWith("Custom", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private string NextCustomColumnKey()
-    {
-        var maxIndex = 0;
-        foreach (DataGridViewRow row in _directoryColumnsGrid.Rows)
-        {
-            var tag = row.Tag?.ToString() ?? "";
-            if (!tag.StartsWith("Custom", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-            if (tag.Length > "Custom".Length
-                && int.TryParse(tag.Substring("Custom".Length), out var index))
-            {
-                maxIndex = Math.Max(maxIndex, index);
-            }
-        }
-        return $"Custom{maxIndex + 1}";
-    }
-
-    /// <summary>在指定位置插入一个新的自定义行；新行列名、内容均可编辑，默认启用。</summary>
-    private void InsertCustomRow(int insertIndex)
-    {
-        _directoryColumnsGrid.EndEdit();
-        insertIndex = Math.Max(0, Math.Min(insertIndex, _directoryColumnsGrid.Rows.Count));
-
-        var row = new DataGridViewRow();
-        row.CreateCells(_directoryColumnsGrid);
-        _directoryColumnsGrid.Rows.Insert(insertIndex, row);
-
-        // 行加入表格后再按列名设置单元格值，否则未挂接的行的 Cells 无法解析列名而报错。
-        row.Cells["Enabled"].Value = true;
-        row.Cells["Centered"].Value = false;
-        row.Cells["Header"].Value = "自定义";
-        row.Cells["Width"].Value = "2000";
-        row.Cells["CustomText"].Value = "";
-        row.Tag = NextCustomColumnKey();
-
-        _directoryColumnsGrid.ClearSelection();
-        row.Selected = true;
-        // 不在菜单点击处理器内设置 CurrentCell：EditOnEnter 模式下会立即尝试进入编辑，
-        // 而此时焦点仍在菜单上，DataGridView 内部重入会抛出 rowIndex 越界异常并破坏编辑状态。
-        // 用户单击单元格时 EditOnEnter 会自动进入编辑，无需在此主动定位。
-        UpdateDirectoryPreview();
-    }
-
-    private void DeleteDirectoryRow(int rowIndex)
-    {
-        if (rowIndex < 0 || rowIndex >= _directoryColumnsGrid.Rows.Count)
-        {
-            return;
-        }
-        _directoryColumnsGrid.EndEdit();
-        _directoryColumnsGrid.Rows.RemoveAt(rowIndex);
-        UpdateDirectoryPreview();
     }
 
     private static TableLayoutPanel CreateSettingsTable(int rows)
@@ -1849,15 +1179,7 @@ public sealed class SettingsForm : Form
         UpdateSequenceDigitsState();
         UpdateFileNamePreview();
         _openExternalDwgForPlot.Checked = settings.OpenExternalDwgForPlot;
-        _directoryColorIndex.SelectedIndex = Math.Max(0, Math.Min(256, settings.DirectoryColorIndex));
-        _directoryTextHeight.Value = UiLayout.Clamp(_directoryTextHeight, settings.DirectoryTextHeight);
-        _directoryTextWidthFactor.Value = UiLayout.Clamp(_directoryTextWidthFactor, settings.DirectoryTextWidthFactor);
-        _directoryRowHeight.Value = UiLayout.Clamp(_directoryRowHeight, settings.DirectoryRowHeight);
-        _directoryLayerName.Text = settings.DirectoryLayerName;
-        _directoryDrawHeader.Checked = settings.DirectoryDrawHeader;
-        _directoryDrawGridLines.Checked = settings.DirectoryDrawGridLines;
-        SelectTextStyle(settings.DirectoryTextStyleName);
-        LoadDirectoryColumns(settings.DirectoryColumns);
+        _directoryControl.ApplySettings(settings);
         _longPaperNameFormat.SelectedIndex = Math.Max(0, Math.Min(5, (int)settings.LongPaperNameFormat));
         _longPaperSnapTolerance.Value = UiLayout.Clamp(
             _longPaperSnapTolerance,
@@ -1881,7 +1203,7 @@ public sealed class SettingsForm : Form
     private bool TryReadSettingsFromControls(out AppSettings current)
     {
         current = AppSettingsStore.Load();
-        if (!TryReadDirectoryColumns(out var directoryColumns))
+        if (!_directoryControl.TryReadSnapshot(out var directory))
         {
             return false;
         }
@@ -1907,20 +1229,16 @@ public sealed class SettingsForm : Form
         current.FileNameSequenceDigits = (int)_fileNameSequenceDigits.Value;
         current.AutoFileNameSequenceDigits = _autoFileNameSequenceDigits.Checked;
         current.OpenExternalDwgForPlot = _openExternalDwgForPlot.Checked;
-        current.DirectoryColorIndex = _directoryColorIndex.SelectedItem is DirectoryColorItem colorItem
-            ? colorItem.Index
-            : 7;
-        current.DirectoryTextHeight = (double)_directoryTextHeight.Value;
-        current.DirectoryTextWidthFactor = (double)_directoryTextWidthFactor.Value;
-        current.DirectoryRowHeight = (double)_directoryRowHeight.Value;
-        current.DirectoryTextHeightRatio = Math.Max(0.01, Math.Min(0.9, current.DirectoryTextHeight / current.DirectoryRowHeight));
-        current.DirectoryTextStyleName = _directoryTextStyle.SelectedItem?.ToString() == DefaultTextStyleDisplay
-            ? ""
-            : _directoryTextStyle.SelectedItem?.ToString() ?? "";
-        current.DirectoryLayerName = string.IsNullOrWhiteSpace(_directoryLayerName.Text) ? "0" : _directoryLayerName.Text.Trim();
-        current.DirectoryDrawHeader = _directoryDrawHeader.Checked;
-        current.DirectoryDrawGridLines = _directoryDrawGridLines.Checked;
-        current.DirectoryColumns = directoryColumns;
+        current.DirectoryColorIndex = directory.ColorIndex;
+        current.DirectoryTextHeight = directory.TextHeight;
+        current.DirectoryTextWidthFactor = directory.TextWidthFactor;
+        current.DirectoryRowHeight = directory.RowHeight;
+        current.DirectoryTextHeightRatio = Math.Max(0.01, Math.Min(0.9, directory.TextHeight / directory.RowHeight));
+        current.DirectoryTextStyleName = directory.TextStyleName;
+        current.DirectoryLayerName = directory.LayerName;
+        current.DirectoryDrawHeader = directory.DrawHeader;
+        current.DirectoryDrawGridLines = directory.DrawGridLines;
+        current.DirectoryColumns = directory.Columns;
         current.LongPaperNameFormat = (LongPaperNameFormat)Math.Max(0, Math.Min(5, _longPaperNameFormat.SelectedIndex));
         current.LongPaperSnapToleranceMm = (double)_longPaperSnapTolerance.Value;
         current.CustomScales = ReadCustomScalesFromList();
@@ -1928,240 +1246,10 @@ public sealed class SettingsForm : Form
         return true;
     }
 
-    private void LoadDirectoryColumns(IEnumerable<DirectoryColumnSetting> columns)
+    /// <summary>读取当前图纸的文字样式列表（含“（默认）”占位与“宋体”兜底），注入 WPF 目录设置控件。</summary>
+    private List<string> LoadTextStyles()
     {
-        _directoryColumnsGrid.Rows.Clear();
-        foreach (var column in columns)
-        {
-            var rowIndex = _directoryColumnsGrid.Rows.Add(
-                column.Enabled,
-                column.Centered,
-                column.Header,
-                column.Width.ToString("0.##", CultureInfo.CurrentCulture));
-            var row = _directoryColumnsGrid.Rows[rowIndex];
-            if (column.IsCustom && !string.IsNullOrEmpty(column.CustomText))
-            {
-                row.Cells["CustomText"].Value = column.CustomText;
-            }
-            row.Tag = column.Key;
-        }
-        UpdateDirectoryPreview();
-    }
-
-    private void UpdateDirectoryPreview()
-    {
-        if (_directoryColumnsGrid.Columns.Count == 0)
-        {
-            return;
-        }
-
-        var columns = new List<DirectoryPreviewColumn>();
-        foreach (DataGridViewRow row in _directoryColumnsGrid.Rows)
-        {
-            if (!Convert.ToBoolean(row.Cells["Enabled"].Value ?? false))
-            {
-                continue;
-            }
-
-            var widthText = row.Cells["Width"].Value?.ToString() ?? "";
-            if (!double.TryParse(widthText, NumberStyles.Float, CultureInfo.CurrentCulture, out var width)
-                && !double.TryParse(widthText, NumberStyles.Float, CultureInfo.InvariantCulture, out width))
-            {
-                continue;
-            }
-            if (width <= 0)
-            {
-                continue;
-            }
-
-            columns.Add(new DirectoryPreviewColumn(
-                row.Cells["Header"].Value?.ToString() ?? "",
-                width,
-                Convert.ToBoolean(row.Cells["Centered"].Value ?? false)));
-        }
-
-        var styleName = _directoryTextStyle.SelectedItem?.ToString();
-        if (string.IsNullOrWhiteSpace(styleName) || styleName == DefaultTextStyleDisplay)
-        {
-            styleName = Font.Name;
-        }
-        _directoryOrderPreview.SetPreview(
-            columns,
-            (double)_directoryRowHeight.Value,
-            (double)_directoryTextHeight.Value,
-            (double)_directoryTextWidthFactor.Value,
-            styleName ?? Font.Name);
-    }
-
-    private sealed class DirectoryPreviewColumn
-    {
-        public string Header { get; }
-        public double Width { get; }
-        public bool Centered { get; }
-
-        public DirectoryPreviewColumn(string header, double width, bool centered)
-        {
-            Header = header;
-            Width = width;
-            Centered = centered;
-        }
-    }
-
-    private sealed class DirectoryPreviewControl : Control
-    {
-        private IReadOnlyList<DirectoryPreviewColumn> _columns = Array.Empty<DirectoryPreviewColumn>();
-        private double _rowHeight = 1;
-        private double _textHeight = 1;
-        private double _textWidthFactor = 0.7;
-        private string _fontName = "宋体";
-
-        public DirectoryPreviewControl()
-        {
-            DoubleBuffered = true;
-            Dock = DockStyle.Fill;
-            BackColor = Color.White;
-            Margin = Padding.Empty;
-        }
-
-        public void SetPreview(
-            IReadOnlyList<DirectoryPreviewColumn> columns,
-            double rowHeight,
-            double textHeight,
-            double textWidthFactor,
-            string fontName)
-        {
-            _columns = columns.ToList();
-            _rowHeight = Math.Max(1, rowHeight);
-            _textHeight = Math.Max(1, textHeight);
-            _textWidthFactor = Math.Max(0.1, textWidthFactor);
-            _fontName = string.IsNullOrWhiteSpace(fontName) ? "宋体" : fontName;
-            Invalidate();
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            if (_columns.Count == 0)
-            {
-                TextRenderer.DrawText(
-                    e.Graphics,
-                    "请勾选需要生成的目录列",
-                    Font,
-                    ClientRectangle,
-                    Color.DimGray,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-                return;
-            }
-
-            var totalWidth = _columns.Sum(x => x.Width);
-            if (totalWidth <= 0 || ClientSize.Width <= 0 || ClientSize.Height <= 0)
-            {
-                return;
-            }
-
-            var padding = UiLayout.Scale(6);
-            var availableWidth = Math.Max(1, ClientSize.Width - padding * 2);
-            var availableHeight = Math.Max(1, ClientSize.Height - padding * 2);
-            // 列宽和行高共用同一个缩放比例，保证预览中的长宽关系与最终 CAD 目录完全一致。
-            var scale = Math.Min(availableWidth / totalWidth, availableHeight / _rowHeight);
-            var previewWidth = (float)(totalWidth * scale);
-            var previewHeight = (float)(_rowHeight * scale);
-            var x = (ClientSize.Width - previewWidth) / 2f;
-            var y = (ClientSize.Height - previewHeight) / 2f;
-
-            using var linePen = new Pen(Color.FromArgb(70, 70, 70), Math.Max(1, UiLayout.Scale(1)));
-            foreach (var column in _columns)
-            {
-                var cellWidth = (float)(column.Width * scale);
-                var cell = new RectangleF(x, y, cellWidth, previewHeight);
-                e.Graphics.DrawRectangle(linePen, cell.X, cell.Y, cell.Width, cell.Height);
-
-                // 与目录生成逻辑保持相同的行高和列宽限幅，预览字高即最终实际可用字高的等比结果。
-                var byRow = _rowHeight * 0.8;
-                var byWidth = column.Width * 0.9 / Math.Max(1, column.Header.Length * _textWidthFactor);
-                var fontPixels = (float)(Math.Max(1, Math.Min(_textHeight, Math.Min(byRow, byWidth))) * scale);
-                using var previewFont = CreatePreviewFont(_fontName, Math.Max(1, fontPixels), Font);
-                using var format = new StringFormat
-                {
-                    Alignment = column.Centered ? StringAlignment.Center : StringAlignment.Near,
-                    LineAlignment = StringAlignment.Center,
-                    Trimming = StringTrimming.EllipsisCharacter,
-                    FormatFlags = StringFormatFlags.NoWrap
-                };
-                var textCell = RectangleF.Inflate(cell, -Math.Min(UiLayout.Scale(4), cell.Width * 0.04f), 0);
-                e.Graphics.DrawString(column.Header, previewFont, Brushes.Black, textCell, format);
-                x += cellWidth;
-            }
-        }
-
-        private static System.Drawing.Font CreatePreviewFont(string fontName, float size, System.Drawing.Font fallback)
-        {
-            try
-            {
-                return new System.Drawing.Font(fontName, size, FontStyle.Regular, GraphicsUnit.Pixel);
-            }
-            catch
-            {
-                return new System.Drawing.Font(fallback.FontFamily, size, FontStyle.Regular, GraphicsUnit.Pixel);
-            }
-        }
-    }
-
-    private bool TryReadDirectoryColumns(out List<DirectoryColumnSetting> columns)
-    {
-        columns = new List<DirectoryColumnSetting>();
-        _directoryColumnsGrid.EndEdit();
-        foreach (DataGridViewRow row in _directoryColumnsGrid.Rows)
-        {
-            var key = row.Tag?.ToString() ?? "";
-            var header = row.Cells["Header"].Value?.ToString()?.Trim() ?? "";
-            var widthText = row.Cells["Width"].Value?.ToString()?.Trim() ?? "";
-            if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(header))
-            {
-                MessageBox.Show("目录列名不能为空。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                _directoryColumnsGrid.CurrentCell = row.Cells["Header"];
-                return false;
-            }
-
-            if (!double.TryParse(widthText, NumberStyles.Float, CultureInfo.CurrentCulture, out var width)
-                && !double.TryParse(widthText, NumberStyles.Float, CultureInfo.InvariantCulture, out width))
-            {
-                width = 0;
-            }
-            if (width <= 0)
-            {
-                MessageBox.Show($"目录列“{header}”的列宽必须大于 0。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                _directoryColumnsGrid.CurrentCell = row.Cells["Width"];
-                return false;
-            }
-
-            columns.Add(new DirectoryColumnSetting
-            {
-                Key = key,
-                Header = header,
-                Enabled = Convert.ToBoolean(row.Cells["Enabled"].Value ?? false),
-                Centered = Convert.ToBoolean(row.Cells["Centered"].Value ?? false),
-                Width = width,
-                IsCustom = IsCustomRow(row),
-                CustomText = row.Cells["CustomText"].Value?.ToString()?.Trim() ?? ""
-            });
-        }
-
-        if (!columns.Any(x => x.Enabled))
-        {
-            MessageBox.Show("请至少启用一个目录字段。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return false;
-        }
-
-        return true;
-    }
-
-    private void LoadTextStyles()
-    {
-        _directoryTextStyle.Items.Clear();
-        _directoryTextStyle.Items.Add(DefaultTextStyleDisplay);
+        var items = new List<string> { DefaultTextStyleDisplay };
 
         var document = GetActiveDocument();
         if (document != null)
@@ -2175,7 +1263,7 @@ public sealed class SettingsForm : Form
                     var record = (TextStyleTableRecord)tr.GetObject(id, OpenMode.ForRead);
                     if (!string.IsNullOrWhiteSpace(record.Name))
                     {
-                        _directoryTextStyle.Items.Add(record.Name);
+                        items.Add(record.Name);
                     }
                 }
 
@@ -2187,37 +1275,15 @@ public sealed class SettingsForm : Form
         }
 
         // 即使当前图纸尚未建立“宋体”文字样式，也先在界面提供该默认项；生成目录时会在本图内自动创建。
-        if (!_directoryTextStyle.Items.Cast<object>().Any(x =>
-            string.Equals(x?.ToString(), "宋体", StringComparison.OrdinalIgnoreCase)))
+        if (!items.Any(x => string.Equals(x, "宋体", StringComparison.OrdinalIgnoreCase)))
         {
-            _directoryTextStyle.Items.Insert(1, "宋体");
+            items.Insert(1, "宋体");
         }
 
-        if (_directoryTextStyle.Items.Count > 0)
-        {
-            _directoryTextStyle.SelectedIndex = 0;
-        }
+        return items;
     }
 
-    private void SelectTextStyle(string? name)
-    {
-        var target = string.IsNullOrWhiteSpace(name) ? DefaultTextStyleDisplay : name;
-        for (var i = 0; i < _directoryTextStyle.Items.Count; i++)
-        {
-            if (string.Equals(_directoryTextStyle.Items[i]?.ToString(), target, StringComparison.OrdinalIgnoreCase))
-            {
-                _directoryTextStyle.SelectedIndex = i;
-                return;
-            }
-        }
-
-        if (_directoryTextStyle.Items.Count > 0)
-        {
-            _directoryTextStyle.SelectedIndex = 0;
-        }
-    }
-
-    private void RequestColumnWidthFromCad(int rowIndex)
+    private void RequestColumnWidthFromCad(string key)
     {
         if (GetActiveDocument() == null)
         {
@@ -2225,14 +1291,7 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        if (rowIndex < 0 || rowIndex >= _directoryColumnsGrid.Rows.Count
-            || !TryReadSettingsFromControls(out var settings))
-        {
-            return;
-        }
-
-        var key = _directoryColumnsGrid.Rows[rowIndex].Tag?.ToString();
-        if (string.IsNullOrWhiteSpace(key))
+        if (string.IsNullOrWhiteSpace(key) || !TryReadSettingsFromControls(out var settings))
         {
             return;
         }
