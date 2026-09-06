@@ -1598,7 +1598,8 @@ public sealed class SettingsForm : Form
             {
                 continue;
             }
-            if (int.TryParse(tag.AsSpan("Custom".Length), out var index))
+            if (tag.Length > "Custom".Length
+                && int.TryParse(tag.Substring("Custom".Length), out var index))
             {
                 maxIndex = Math.Max(maxIndex, index);
             }

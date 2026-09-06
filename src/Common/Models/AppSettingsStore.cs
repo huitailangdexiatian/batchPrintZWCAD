@@ -448,7 +448,8 @@ public static class AppSettingsStore
             {
                 continue;
             }
-            if (int.TryParse(column.Key.AsSpan("Custom".Length), out var index))
+            if (column.Key.Length > "Custom".Length
+                && int.TryParse(column.Key.Substring("Custom".Length), out var index))
             {
                 maxIndex = Math.Max(maxIndex, index);
             }
