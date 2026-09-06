@@ -50,6 +50,11 @@ public sealed class SettingsForm : Form
     private readonly DataGridView _directoryColumnsGrid = new();
     private readonly DirectoryPreviewControl _directoryOrderPreview = new();
 
+    // 目录内容行拖拽排序的状态：整行跟随 + 高亮，位移超过阈值才进入拖拽，避免误触编辑/点击。
+    private int _directoryDragRow = -1;
+    private bool _directoryDragActive;
+    private Point _directoryDragAnchor;
+
     // 文件名设置
     private readonly TextBox _fileNamePattern = new();
     private readonly Label _fileNamePreview = new();
@@ -1311,6 +1316,9 @@ public sealed class SettingsForm : Form
         _directoryColumnsGrid.CellValueChanged += (_, _) => UpdateDirectoryPreview();
         _directoryColumnsGrid.CellEndEdit += (_, _) => UpdateDirectoryPreview();
         _directoryColumnsGrid.DataError += (_, _) => { };
+        _directoryColumnsGrid.MouseDown += DirectoryColumnsGridMouseDown;
+        _directoryColumnsGrid.MouseMove += DirectoryColumnsGridMouseMove;
+        _directoryColumnsGrid.MouseUp += DirectoryColumnsGridMouseUp;
 
         _directoryColumnsGrid.Columns.Add(new DataGridViewCheckBoxColumn
         {
@@ -1407,6 +1415,116 @@ public sealed class SettingsForm : Form
         row.Selected = true;
         _directoryColumnsGrid.CurrentCell = row.Cells[2];
         UpdateDirectoryPreview();
+    }
+
+    /// <summary>
+    /// 目录内容行拖拽：仅捕获左键按下，记录起点行与鼠标锚点，尚未位移不视为拖拽。
+    /// 点击在按钮列时交给原有按钮逻辑，不进入拖拽。
+    /// </summary>
+    private void DirectoryColumnsGridMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            return;
+        }
+
+        var hit = _directoryColumnsGrid.HitTest(e.X, e.Y);
+        if (hit.RowIndex < 0
+            || hit.RowIndex >= _directoryColumnsGrid.Rows.Count
+            || hit.ColumnIndex < 0
+            || _directoryColumnsGrid.Columns[hit.ColumnIndex] is DataGridViewButtonColumn)
+        {
+            _directoryDragRow = -1;
+            return;
+        }
+
+        _directoryDragRow = hit.RowIndex;
+        _directoryDragAnchor = new Point(e.X, e.Y);
+        _directoryDragActive = false;
+    }
+
+    /// <summary>
+    /// 拖拽跟随：位移超过系统拖拽阈值后进入拖拽，之后把被拖行实时交换到鼠标所在行，
+    /// 实现“整行跟随”预览；松开后落位。使用真实行交换按行居中跟随，避免来回振荡。
+    /// </summary>
+    private void DirectoryColumnsGridMouseMove(object? sender, MouseEventArgs e)
+    {
+        if (_directoryDragRow < 0)
+        {
+            return;
+        }
+
+        if (!_directoryDragActive)
+        {
+            var dx = Math.Abs(e.X - _directoryDragAnchor.X);
+            var dy = Math.Abs(e.Y - _directoryDragAnchor.Y);
+            if (dx < SystemInformation.DragSize.Width && dy < SystemInformation.DragSize.Height)
+            {
+                return;
+            }
+
+            // 进入拖拽：取消编辑与单元格选中，避免复选框/文本编辑干扰，并保持捕获以接收松开发布。
+            _directoryDragActive = true;
+            _directoryColumnsGrid.EndEdit();
+            _directoryColumnsGrid.ClearSelection();
+            _directoryColumnsGrid.Capture = true;
+            _directoryColumnsGrid.Cursor = Cursors.SizeNS;
+        }
+
+        var hit = _directoryColumnsGrid.HitTest(e.X, e.Y);
+        if (hit.RowIndex < 0 || hit.RowIndex >= _directoryColumnsGrid.Rows.Count)
+        {
+            return;
+        }
+
+        var currentRow = _directoryDragRow;
+        if (currentRow < 0 || hit.RowIndex == currentRow)
+        {
+            return;
+        }
+
+        // 复用行移动逻辑做实时预览；交换后被拖行本身会落到鼠标所在行，下一次判定自然稳定。
+        var row = _directoryColumnsGrid.Rows[currentRow];
+        _directoryColumnsGrid.Rows.RemoveAt(currentRow);
+        _directoryColumnsGrid.Rows.Insert(hit.RowIndex, row);
+        _directoryDragRow = hit.RowIndex;
+        row.Selected = true; // 拖拽中的高亮以整行选中形式呈现
+    }
+
+    private void DirectoryColumnsGridMouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            return;
+        }
+
+        var wasDrag = _directoryDragActive;
+        var finalRow = _directoryDragRow;
+        EndDirectoryDrag();
+        if (wasDrag)
+        {
+            // 拖拽落位后刷新顺序预览，并保持被拖行高亮以便确认结果。
+            UpdateDirectoryPreview();
+            if (finalRow >= 0
+                && finalRow < _directoryColumnsGrid.Rows.Count)
+            {
+                _directoryColumnsGrid.Rows[finalRow].Selected = true;
+            }
+        }
+    }
+
+    private void EndDirectoryDrag()
+    {
+        _directoryDragRow = -1;
+        _directoryDragActive = false;
+        if (_directoryColumnsGrid.Capture)
+        {
+            _directoryColumnsGrid.Capture = false;
+        }
+        if (_directoryColumnsGrid.Cursor == Cursors.SizeNS)
+        {
+            _directoryColumnsGrid.Cursor = Cursors.Default;
+        }
     }
 
     private static TableLayoutPanel CreateSettingsTable(int rows)
