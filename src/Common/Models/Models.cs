@@ -10,6 +10,8 @@ public sealed class TitleBlockDefinition
     public const string DynamicRightBottomCoordinateMode = "FrameRightBottomDynamic";
 
     public string BlockName { get; set; } = "";
+    /// <summary>是否为属性图框：字段值从块属性（Attribute）按关键字提取，而非框选文字区域。</summary>
+    public bool IsAttributeBased { get; set; }
     public bool HasPrintRegion { get; set; }
     public string CoordinateMode { get; set; } = "Local";
     public LocalRectangle PrintRegion { get; set; } = new();

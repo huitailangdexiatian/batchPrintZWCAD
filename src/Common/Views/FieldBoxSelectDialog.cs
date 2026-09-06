@@ -28,6 +28,22 @@ public sealed class FieldBoxSelectInitialState
     public double PaperHeightMm { get; set; }
 }
 
+/// <summary>属性图框录入时展示的块属性预览项：标签、当前值与按关键字命中的字段名。</summary>
+public sealed class AttributePreviewItem
+{
+    public AttributePreviewItem(string tag, string value, string matchedField)
+    {
+        Tag = tag;
+        Value = value;
+        MatchedField = matchedField;
+    }
+
+    public string Tag { get; }
+    public string Value { get; }
+    /// <summary>命中的字段显示名（如“图名”）；未命中为空字符串。</summary>
+    public string MatchedField { get; }
+}
+
 /// <summary>
 /// 新增或编辑图框字段框选对话框。
 /// 图名/图号为必选，日期/版次/设计阶段/信息1/信息2可选框选。
@@ -45,6 +61,10 @@ public sealed class FieldBoxSelectDialog : Form
 
     // 打印范围（外框）的世界坐标角点，随用户重新框选而更新。
     private (Point3d Corner1, Point3d Corner2) _printAreaCorners;
+
+    // 属性图框模式：隐藏字段框选区，改为展示块属性与关键字命中结果。
+    private readonly bool _attributeMode;
+    private readonly IReadOnlyList<AttributePreviewItem> _attributePreview = Array.Empty<AttributePreviewItem>();
 
     private readonly Label _printAreaStatus;
     private readonly Label _titleStatus;
@@ -85,7 +105,8 @@ public sealed class FieldBoxSelectDialog : Form
         Matrix3d blockTransform, TransientFrameMarkers markers, LocalRectangle referenceFrame,
         IReadOnlyList<PaperDetection> paperOptions,
         PaperSizeDetector.DetectionOptions paperDetectionOptions,
-        FieldBoxSelectInitialState? initialState = null)
+        FieldBoxSelectInitialState? initialState = null,
+        IReadOnlyList<AttributePreviewItem>? attributePreview = null)
     {
         _editor = editor;
         _inverseBlockTransform = inverseBlockTransform;
@@ -93,6 +114,8 @@ public sealed class FieldBoxSelectDialog : Form
         _markers = markers;
         _paperDetectionOptions = paperDetectionOptions;
         ReferenceFrame = referenceFrame;
+        _attributeMode = attributePreview != null;
+        _attributePreview = attributePreview ?? Array.Empty<AttributePreviewItem>();
 
         // 用 4 个局部角点完整变换后取得世界包盒；不能只变换一对对角点，
         // 否则旋转块在窗口重新显示时会把初始红框替换成错误范围。
@@ -101,7 +124,7 @@ public sealed class FieldBoxSelectDialog : Form
             new Point3d(worldFrame.MinX, worldFrame.MinY, 0),
             new Point3d(worldFrame.MaxX, worldFrame.MaxY, 0));
 
-        Text = "设置图框字段与纸张";
+        Text = _attributeMode ? "设置属性图框纸张" : "设置图框字段与纸张";
         UiLayout.ConfigureForm(this, 460, 436, 430, 410);
         // 打印范围、纸张各一行，纵向多两行。
         ClientSize = new Size(UiLayout.Scale(460), UiLayout.Scale(414));
@@ -117,15 +140,27 @@ public sealed class FieldBoxSelectDialog : Form
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        // Row 0: 打印范围（可重新框选），Row 1-7: 字段（图名/图号必选，其余可选），Row 8: 纸张
-        for (var i = 0; i < 9; i++)
+        if (_attributeMode)
         {
+            // 属性图框模式：Row 0 打印范围、Row 1 纸张、Row 2 属性预览、Row 3 提示、Row 4 按钮。
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(34)));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(34)));
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(44)));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(36)));
         }
-        // Row 9: 提示
-        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        // Row 10: 按钮
-        table.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(36)));
+        else
+        {
+            // Row 0: 打印范围（可重新框选），Row 1-7: 字段（图名/图号必选，其余可选），Row 8: 纸张
+            for (var i = 0; i < 9; i++)
+            {
+                table.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(34)));
+            }
+            // Row 9: 提示
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            // Row 10: 按钮
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(36)));
+        }
 
         // 打印范围：显示当前尺寸，提供"框选"按钮供用户修正自动识别的外框。
         table.Controls.Add(MakeLabel("打印范围"), 0, 0);
@@ -133,47 +168,63 @@ public sealed class FieldBoxSelectDialog : Form
         UpdatePrintAreaStatus();
         table.Controls.Add(MakePrintAreaRow(_printAreaStatus, SelectPrintArea), 1, 0);
 
-        // 图名/图号为必选字段，保存前必须完成框选。
-        table.Controls.Add(MakeLabel("图名 *"), 0, 1);
+        // 只读状态标签统一初始化（属性模式下不加入布局，仅供字段方法安全引用）。
         _titleStatus = MakeStatusLabel();
-        table.Controls.Add(MakeFieldRow(_titleStatus, SelectTitle, ClearTitle), 1, 1);
-
-        table.Controls.Add(MakeLabel("图号 *"), 0, 2);
         _numberStatus = MakeStatusLabel();
-        table.Controls.Add(MakeFieldRow(_numberStatus, SelectNumber, ClearNumber), 1, 2);
-
-        // 日期
-        table.Controls.Add(MakeLabel("日期"), 0, 3);
         _dateStatus = MakeStatusLabel();
-        table.Controls.Add(MakeFieldRow(_dateStatus, SelectDate, ClearDate), 1, 3);
-
-        // 版次
-        table.Controls.Add(MakeLabel("版次"), 0, 4);
         _revisionStatus = MakeStatusLabel();
-        table.Controls.Add(MakeFieldRow(_revisionStatus, SelectRevision, ClearRevision), 1, 4);
-
-        // 设计阶段
-        table.Controls.Add(MakeLabel("设计阶段"), 0, 5);
         _phaseStatus = MakeStatusLabel();
-        table.Controls.Add(MakeFieldRow(_phaseStatus, SelectPhase, ClearPhase), 1, 5);
-
-        // 信息1/信息2为用户自定义可选字段，可用于后续文件名命名。
-        table.Controls.Add(MakeLabel("信息1"), 0, 6);
         _info1Status = MakeStatusLabel();
-        table.Controls.Add(MakeFieldRow(_info1Status, SelectInfo1, ClearInfo1), 1, 6);
-
-        table.Controls.Add(MakeLabel("信息2"), 0, 7);
         _info2Status = MakeStatusLabel();
-        table.Controls.Add(MakeFieldRow(_info2Status, SelectInfo2, ClearInfo2), 1, 7);
 
-        if (initialState != null)
+        int paperRow;
+        if (_attributeMode)
+        {
+            // 属性图框模式：不框选字段区域，改为展示块属性与关键字命中结果。
+            paperRow = 1;
+
+            var previewGrid = BuildAttributePreviewGrid();
+            table.SetColumnSpan(previewGrid, 2);
+            table.Controls.Add(previewGrid, 0, 2);
+        }
+        else
+        {
+            // 图名/图号为必选字段，保存前必须完成框选。
+            table.Controls.Add(MakeLabel("图名 *"), 0, 1);
+            table.Controls.Add(MakeFieldRow(_titleStatus, SelectTitle, ClearTitle), 1, 1);
+
+            table.Controls.Add(MakeLabel("图号 *"), 0, 2);
+            table.Controls.Add(MakeFieldRow(_numberStatus, SelectNumber, ClearNumber), 1, 2);
+
+            // 日期
+            table.Controls.Add(MakeLabel("日期"), 0, 3);
+            table.Controls.Add(MakeFieldRow(_dateStatus, SelectDate, ClearDate), 1, 3);
+
+            // 版次
+            table.Controls.Add(MakeLabel("版次"), 0, 4);
+            table.Controls.Add(MakeFieldRow(_revisionStatus, SelectRevision, ClearRevision), 1, 4);
+
+            // 设计阶段
+            table.Controls.Add(MakeLabel("设计阶段"), 0, 5);
+            table.Controls.Add(MakeFieldRow(_phaseStatus, SelectPhase, ClearPhase), 1, 5);
+
+            // 信息1/信息2为用户自定义可选字段，可用于后续文件名命名。
+            table.Controls.Add(MakeLabel("信息1"), 0, 6);
+            table.Controls.Add(MakeFieldRow(_info1Status, SelectInfo1, ClearInfo1), 1, 6);
+
+            table.Controls.Add(MakeLabel("信息2"), 0, 7);
+            table.Controls.Add(MakeFieldRow(_info2Status, SelectInfo2, ClearInfo2), 1, 7);
+            paperRow = 8;
+        }
+
+        if (initialState != null && !_attributeMode)
         {
             ApplyInitialState(initialState);
         }
 
         // 纸张：默认按打印范围自动识别，重新框选打印范围时同步刷新，也可手动修改。
-        table.Controls.Add(MakeLabel("纸张"), 0, 8);
-        table.Controls.Add(MakePaperRow(), 1, 8);
+        table.Controls.Add(MakeLabel("纸张"), 0, paperRow);
+        table.Controls.Add(MakePaperRow(), 1, paperRow);
         ApplyPaperOptions(
             paperOptions,
             initialState?.PaperName,
@@ -181,16 +232,19 @@ public sealed class FieldBoxSelectDialog : Form
             initialState?.PaperHeightMm ?? 0d);
 
         // 提示
+        var hintText = _attributeMode
+            ? "属性图框：图名、图号等字段值将在扫描时按设置的关键字从块属性自动提取（此处列出属性标签与当前值，绿色为已命中字段）。关键字可在\"批量打印设置 → 属性图框设置\"中修改。"
+            : "图名、图号为必选。点击\"框选\"在 CAD 中框选对应区域，已选区域以红色临时框标识；纸张按打印范围自动识别，可手动修改。";
         var hint = new Label
         {
-            Text = "图名、图号为必选。点击\"框选\"在 CAD 中框选对应区域，已选区域以红色临时框标识；纸张按打印范围自动识别，可手动修改。",
+            Text = hintText,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Color.DimGray,
             Font = new Font(Font.FontFamily, Math.Max(Font.Size - 1, 7))
         };
         table.SetColumnSpan(hint, 2);
-        table.Controls.Add(hint, 0, 9);
+        table.Controls.Add(hint, 0, _attributeMode ? 3 : 9);
 
         // 按钮
         var buttons = new FlowLayoutPanel
@@ -212,22 +266,31 @@ public sealed class FieldBoxSelectDialog : Form
             DialogResult = DialogResult.OK;
             Close();
         };
-        skip.Click += (_, _) =>
+        if (_attributeMode)
         {
-            // 跳过仅留空可选字段，图名/图号仍为必选。
-            if (!ValidateRequiredFields())
+            // 属性图框无字段框选，无需"跳过"清理可选区域。
+            skip.Visible = false;
+        }
+        else
+        {
+            skip.Click += (_, _) =>
             {
-                return;
-            }
+                // 跳过仅留空可选字段，图名/图号仍为必选。
+                if (!ValidateRequiredFields())
+                {
+                    return;
+                }
 
-            ClearOptionalField("日期", r => DateRegion = r, _dateStatus);
-            ClearOptionalField("版次", r => RevisionRegion = r, _revisionStatus);
-            ClearOptionalField("设计阶段", r => PhaseRegion = r, _phaseStatus);
-            ClearOptionalField("信息1", r => Info1Region = r, _info1Status);
-            ClearOptionalField("信息2", r => Info2Region = r, _info2Status);
-            DialogResult = DialogResult.OK;
-            Close();
-        };
+                ClearOptionalField("日期", r => DateRegion = r, _dateStatus);
+                ClearOptionalField("版次", r => RevisionRegion = r, _revisionStatus);
+                ClearOptionalField("设计阶段", r => PhaseRegion = r, _phaseStatus);
+                ClearOptionalField("信息1", r => Info1Region = r, _info1Status);
+                ClearOptionalField("信息2", r => Info2Region = r, _info2Status);
+                DialogResult = DialogResult.OK;
+                Close();
+            };
+        }
+
         cancel.DialogResult = DialogResult.Cancel;
         AcceptButton = ok;
         CancelButton = cancel;
@@ -235,7 +298,7 @@ public sealed class FieldBoxSelectDialog : Form
         buttons.Controls.Add(skip);
         buttons.Controls.Add(cancel);
         table.SetColumnSpan(buttons, 2);
-        table.Controls.Add(buttons, 0, 10);
+        table.Controls.Add(buttons, 0, _attributeMode ? 4 : 10);
 
         Controls.Add(table);
     }
@@ -373,7 +436,8 @@ public sealed class FieldBoxSelectDialog : Form
 
     private bool ValidateRequiredFields()
     {
-        if (!TitleRegion.HasArea() || !DrawingNumberRegion.HasArea())
+        if (!_attributeMode
+            && (!TitleRegion.HasArea() || !DrawingNumberRegion.HasArea()))
         {
             MessageBox.Show(this,
                 "图名和图号为必选项，请先点击对应\"框选\"按钮完成框选。",
@@ -390,6 +454,46 @@ public sealed class FieldBoxSelectDialog : Form
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 属性图框模式的属性预览表格：列出块全部属性标签与当前值，并标注按关键字命中的字段。
+    /// </summary>
+    private DataGridView BuildAttributePreviewGrid()
+    {
+        var grid = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AllowUserToResizeRows = false,
+            ReadOnly = true,
+            RowHeadersVisible = false,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+            BackgroundColor = SystemColors.Window,
+            BorderStyle = BorderStyle.FixedSingle,
+            Margin = new Padding(0, UiLayout.Scale(4), 0, UiLayout.Scale(4))
+        };
+        grid.Columns.Add("tag", "属性标签");
+        grid.Columns.Add("value", "当前值");
+        grid.Columns.Add("field", "命中字段");
+        grid.Columns["tag"]!.FillWeight = 35;
+        grid.Columns["value"]!.FillWeight = 45;
+        grid.Columns["field"]!.FillWeight = 20;
+
+        foreach (var item in _attributePreview)
+        {
+            var rowIndex = grid.Rows.Add(item.Tag, item.Value, item.MatchedField);
+            if (item.MatchedField.Length > 0)
+            {
+                grid.Rows[rowIndex].Cells["field"].Style.ForeColor = Color.Green;
+                grid.Rows[rowIndex].Cells["field"].Style.Font =
+                    new Font(grid.Font, FontStyle.Bold);
+            }
+        }
+
+        return grid;
     }
 
     private void SelectTitle() { if (TryBoxSelect("图名", out var r)) { TitleRegion = r; UpdateStatus(_titleStatus, TitleRegion); } }

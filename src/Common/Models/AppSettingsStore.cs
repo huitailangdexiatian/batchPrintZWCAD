@@ -144,6 +144,11 @@ public sealed class AppSettings
     /// &gt;1 表示 1:N（如 143 表示 1:143）；&lt;1 表示放大比例（如 0.25 表示 4:1）。
     /// </summary>
     public List<double> CustomScales { get; set; } = new();
+    /// <summary>
+    /// 属性图框的字段关键字映射：键为字段键（Title/DrawingNumber/Date/Revision/Phase/Info1/Info2），
+    /// 值为属性标签（Tag）关键字列表，可配置多个，按顺序优先命中。
+    /// </summary>
+    public Dictionary<string, List<string>> AttributeTitleBlockKeywords { get; set; } = new();
 }
 
 public static class AppSettingsStore
@@ -340,6 +345,7 @@ public static class AppSettingsStore
         }
 
         settings.CustomScales = NormalizeCustomScales(settings.CustomScales);
+        settings.AttributeTitleBlockKeywords = NormalizeAttributeTitleBlockKeywords(settings.AttributeTitleBlockKeywords);
 
         return settings;
     }
@@ -366,6 +372,79 @@ public static class AppSettingsStore
         }
 
         normalized.Sort();
+        return normalized;
+    }
+
+    /// <summary>属性图框支持的 7 个字段键，与 PlotJob 图框字段一一对应。</summary>
+    public static readonly IReadOnlyList<string> AttributeTitleBlockFieldKeys = new[]
+    {
+        "Title", "DrawingNumber", "Date", "Revision", "Phase", "Info1", "Info2"
+    };
+
+    /// <summary>字段键对应的界面显示名，供设置页与录入对话框复用。</summary>
+    public static string GetAttributeFieldDisplayName(string fieldKey)
+    {
+        return fieldKey switch
+        {
+            "Title" => "图名",
+            "DrawingNumber" => "图号",
+            "Date" => "日期",
+            "Revision" => "版次",
+            "Phase" => "设计阶段",
+            "Info1" => "信息1",
+            "Info2" => "信息2",
+            _ => fieldKey
+        };
+    }
+
+    /// <summary>各字段默认属性关键字；旧配置缺失时按此补全，不覆盖用户已保存的关键字。</summary>
+    private static List<string> GetDefaultAttributeKeywords(string fieldKey)
+    {
+        return fieldKey switch
+        {
+            "Title" => new List<string> { "图名", "TITLE", "TITLE1" },
+            "DrawingNumber" => new List<string> { "图号", "DWGNO", "SHEETNO", "DRAWINGNO" },
+            "Date" => new List<string> { "日期", "DATE" },
+            "Revision" => new List<string> { "版次", "REV", "REVISION" },
+            "Phase" => new List<string> { "设计阶段", "阶段", "PHASE" },
+            "Info1" => new List<string> { "信息1", "INFO1" },
+            "Info2" => new List<string> { "信息2", "INFO2" },
+            _ => new List<string>()
+        };
+    }
+
+    /// <summary>
+    /// 属性图框关键字兜底：补全缺失字段、去除空白项与重复项；全空时回填默认关键字。
+    /// </summary>
+    private static Dictionary<string, List<string>> NormalizeAttributeTitleBlockKeywords(
+        Dictionary<string, List<string>>? keywords)
+    {
+        var normalized = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var stored = keywords ?? new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var fieldKey in AttributeTitleBlockFieldKeys)
+        {
+            List<string> values = new();
+            if (stored.TryGetValue(fieldKey, out var list) && list != null)
+            {
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var keyword in list)
+                {
+                    var trimmed = keyword?.Trim() ?? "";
+                    if (trimmed.Length > 0 && seen.Add(trimmed))
+                    {
+                        values.Add(trimmed);
+                    }
+                }
+            }
+
+            if (values.Count == 0)
+            {
+                values = GetDefaultAttributeKeywords(fieldKey);
+            }
+
+            normalized[fieldKey] = values;
+        }
+
         return normalized;
     }
 

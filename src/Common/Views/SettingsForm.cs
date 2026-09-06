@@ -67,6 +67,8 @@ public sealed class SettingsForm : Form
 
     // 比例设置
     private readonly ListBox _scaleList = new();
+    // 属性图框设置：字段 → 属性关键字列表（多个关键字用逗号分隔）。
+    private readonly DataGridView _attributeKeywordsGrid = new();
     private readonly TextBox _scaleInput = new();
     private readonly Label _scaleListSummary = new();
     private readonly Label _scaleSelectionHint = new();
@@ -118,6 +120,7 @@ public sealed class SettingsForm : Form
         _tabs.TabPages.Add(BuildFileNameTab());
         _tabs.TabPages.Add(BuildDirectoryTab());
         _tabs.TabPages.Add(BuildScaleTab());
+        _tabs.TabPages.Add(BuildAttributeTitleBlockTab());
 
         var hint = new Label
         {
@@ -134,6 +137,7 @@ public sealed class SettingsForm : Form
                 1 => "文件名预览会随规则即时更新；保存后应用于后续打印和拆图任务。",
                 2 => "图纸目录会写入当前 CAD 当前空间；目录列与批量打印实际识别出的图框字段保持一致。",
                 3 => "图框块录入后自动支持任意比例；比例列表只控制矩形框批量打印的识别范围。",
+                4 => "属性图框按关键字从块属性提取字段值；扫描“新增属性图框”录入的图框时生效。",
                 _ => ""
             };
         }
@@ -598,6 +602,153 @@ public sealed class SettingsForm : Form
             .Where(x => x.IsCustom)
             .Select(x => x.Value)
             .ToList();
+    }
+
+    /// <summary>
+    /// 属性图框设置标签页：7 个图框字段各自配置属性关键字（多个用逗号分隔）。
+    /// 扫描属性图框时按关键字匹配块属性标签提取字段值。
+    /// </summary>
+    private TabPage BuildAttributeTitleBlockTab()
+    {
+        var page = new TabPage("属性图框设置")
+        {
+            Padding = new Padding(UiLayout.Scale(10)),
+            BackColor = SystemColors.Control
+        };
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(66)));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(30)));
+
+        // 顶部说明：关键字的作用范围与匹配规则。
+        var scopePanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(239, 247, 255),
+            Padding = new Padding(UiLayout.Scale(12), UiLayout.Scale(7), UiLayout.Scale(12), UiLayout.Scale(7)),
+            Margin = Padding.Empty
+        };
+        var scopeText = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        scopeText.RowStyles.Add(new RowStyle(SizeType.Absolute, UiLayout.Scale(24)));
+        scopeText.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        scopeText.Controls.Add(new Label
+        {
+            Text = "属性图框字段关键字",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = new System.Drawing.Font(UiLayout.DefaultFont, FontStyle.Bold),
+            ForeColor = Color.FromArgb(28, 78, 121),
+            Margin = Padding.Empty
+        }, 0, 0);
+        scopeText.Controls.Add(new Label
+        {
+            Text = "仅对“新增属性图框”录入的图框生效    ·    按关键字顺序取第一个命中属性，忽略大小写",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Color.FromArgb(55, 76, 94),
+            AutoEllipsis = true,
+            Margin = Padding.Empty
+        }, 0, 1);
+        scopePanel.Controls.Add(scopeText);
+        root.Controls.Add(scopePanel, 0, 0);
+
+        var group = new GroupBox
+        {
+            Text = "字段与属性关键字（多个关键字用逗号分隔）",
+            Dock = DockStyle.Fill,
+            Padding = new Padding(UiLayout.Scale(8)),
+            Margin = Padding.Empty
+        };
+
+        _attributeKeywordsGrid.Dock = DockStyle.Fill;
+        _attributeKeywordsGrid.AllowUserToAddRows = false;
+        _attributeKeywordsGrid.AllowUserToDeleteRows = false;
+        _attributeKeywordsGrid.AllowUserToResizeRows = false;
+        _attributeKeywordsGrid.RowHeadersVisible = false;
+        _attributeKeywordsGrid.SelectionMode = DataGridViewSelectionMode.CellSelect;
+        _attributeKeywordsGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _attributeKeywordsGrid.BackgroundColor = SystemColors.Window;
+        _attributeKeywordsGrid.BorderStyle = BorderStyle.FixedSingle;
+        _attributeKeywordsGrid.Columns.Add("Field", "图框字段");
+        _attributeKeywordsGrid.Columns.Add("Keywords", "属性关键字（逗号分隔，按顺序优先）");
+        _attributeKeywordsGrid.Columns["Field"]!.ReadOnly = true;
+        _attributeKeywordsGrid.Columns["Field"]!.FillWeight = 22;
+        _attributeKeywordsGrid.Columns["Keywords"]!.FillWeight = 78;
+
+        group.Controls.Add(_attributeKeywordsGrid);
+        root.Controls.Add(group, 0, 1);
+
+        // 底部提示：字段值提取后会自动去掉格式控制字符。
+        root.Controls.Add(new Label
+        {
+            Text = "扫描属性图框时，块属性标签（Tag）命中关键字即取该属性值作为字段值，属性值会自动去除 \\P、%%C 等格式控制字符。",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Color.DimGray,
+            AutoEllipsis = true,
+            Margin = Padding.Empty
+        }, 0, 2);
+
+        page.Controls.Add(root);
+        return page;
+    }
+
+    /// <summary>从设置加载属性图框关键字到网格；缺失字段回填默认关键字。</summary>
+    private void LoadAttributeKeywords(AppSettings settings)
+    {
+        _attributeKeywordsGrid.Rows.Clear();
+        foreach (var fieldKey in AppSettingsStore.AttributeTitleBlockFieldKeys)
+        {
+            var keywords = settings.AttributeTitleBlockKeywords.TryGetValue(fieldKey, out var list) && list != null
+                ? list
+                : new List<string>();
+            var rowIndex = _attributeKeywordsGrid.Rows.Add(
+                AppSettingsStore.GetAttributeFieldDisplayName(fieldKey),
+                string.Join(", ", keywords));
+            _attributeKeywordsGrid.Rows[rowIndex].Tag = fieldKey;
+        }
+    }
+
+    /// <summary>从网格读取属性图框关键字；同一字段去重去空，保存时全空字段由 Normalize 回填默认关键字。</summary>
+    private Dictionary<string, List<string>> ReadAttributeKeywordsFromGrid()
+    {
+        var result = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (DataGridViewRow row in _attributeKeywordsGrid.Rows)
+        {
+            if (row.IsNewRow || row.Tag is not string fieldKey)
+            {
+                continue;
+            }
+
+            var keywords = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var keyword in (row.Cells["Keywords"].Value?.ToString() ?? "").Split(',', ';'))
+            {
+                var trimmed = keyword.Trim();
+                if (trimmed.Length > 0 && seen.Add(trimmed))
+                {
+                    keywords.Add(trimmed);
+                }
+            }
+
+            result[fieldKey] = keywords;
+        }
+
+        return result;
     }
 
     private void AddCustomScale()
@@ -1708,6 +1859,7 @@ public sealed class SettingsForm : Form
             _longPaperSnapTolerance,
             settings.LongPaperSnapToleranceMm);
         ReloadScaleList(settings);
+        LoadAttributeKeywords(settings);
     }
 
     private void SaveSettings()
@@ -1768,6 +1920,7 @@ public sealed class SettingsForm : Form
         current.LongPaperNameFormat = (LongPaperNameFormat)Math.Max(0, Math.Min(5, _longPaperNameFormat.SelectedIndex));
         current.LongPaperSnapToleranceMm = (double)_longPaperSnapTolerance.Value;
         current.CustomScales = ReadCustomScalesFromList();
+        current.AttributeTitleBlockKeywords = ReadAttributeKeywordsFromGrid();
         return true;
     }
 

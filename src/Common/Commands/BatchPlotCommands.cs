@@ -80,6 +80,12 @@ public sealed partial class BatchPlotCommands : IExtensionApplication
     [CommandMethod("_ZBP_INTERNAL_ADD_TITLE_BLOCK")]
     public void AddTitleBlockLegacy() => AddTitleBlockCore();
 
+    [CommandMethod("ZBP_ADD_ATTRIBUTE_TITLE_BLOCK")]
+    public void AddAttributeTitleBlock() => AddAttributeTitleBlockCore();
+
+    [CommandMethod("_ZBP_INTERNAL_ADD_ATTRIBUTE_TITLE_BLOCK")]
+    public void AddAttributeTitleBlockLegacy() => AddAttributeTitleBlockCore();
+
     [CommandMethod("ZBP_SHOW_PANEL", CommandFlags.Session)]
     public void ShowBatchPlotWindow() => ShowBatchPlotWindowCore();
 

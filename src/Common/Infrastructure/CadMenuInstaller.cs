@@ -101,6 +101,7 @@ public static class CadMenuInstaller
 
             // 打印功能菜单项
             AddMenuItem(menu, "新增图框", "ZBP_ADD_TITLE_BLOCK");
+            AddMenuItem(menu, "新增属性图框", "ZBP_ADD_ATTRIBUTE_TITLE_BLOCK");
             AddMenuItem(menu, "图框库管理", "ZBP_MANAGE_LIBRARY");
             AddMenuItem(menu, "批量打印(选图框块)", "ZBP_SHOW_PANEL");
             AddMenuItem(menu, "批量打印(选矩形框)", "ZBP_RECTANGLE_BATCH_PLOT");

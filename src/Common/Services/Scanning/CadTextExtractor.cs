@@ -1169,7 +1169,7 @@ public static class CadTextExtractor
         return mText.Contents;
     }
 
-    private static string CleanText(string? text)
+    internal static string CleanText(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
