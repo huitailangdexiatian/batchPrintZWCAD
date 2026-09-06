@@ -1766,13 +1766,15 @@ public sealed class SettingsForm : Form
 
         var row = new DataGridViewRow();
         row.CreateCells(_directoryColumnsGrid);
+        _directoryColumnsGrid.Rows.Insert(insertIndex, row);
+
+        // 行加入表格后再按列名设置单元格值，否则未挂接的行的 Cells 无法解析列名而报错。
         row.Cells["Enabled"].Value = true;
         row.Cells["Centered"].Value = false;
         row.Cells["Header"].Value = "自定义";
         row.Cells["Width"].Value = "2000";
         row.Cells["CustomText"].Value = "";
         row.Tag = NextCustomColumnKey();
-        _directoryColumnsGrid.Rows.Insert(insertIndex, row);
 
         _directoryColumnsGrid.ClearSelection();
         row.Selected = true;
