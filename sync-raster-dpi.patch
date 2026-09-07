@@ -1,0 +1,792 @@
+diff --git a/src/AutoCAD/AcadPlotterInstaller.cs b/src/AutoCAD/AcadPlotterInstaller.cs
+index 47aea3d..0bcaab9 100644
+--- a/src/AutoCAD/AcadPlotterInstaller.cs
++++ b/src/AutoCAD/AcadPlotterInstaller.cs
+@@ -143,6 +143,322 @@ public static class AcadPlotterInstaller
+         return InstallRasterPlotter(PreferredJpgPlotter, PreferredJpgPmp);
+     }
+ 
++    /// <summary>
++    /// 按目标 DPI 重写 LA_png/LA_jpg 的 PMP 像素纸型目录，必要时补充自定义图框尺寸。
++    /// 原子替换 + 失败回滚；纸型集合与现值一致时返回 Changed=false。
++    /// 像素 = 毫米 × DPI ÷ 25.4，对应 MSteel “放大虚拟纸”的像素表达。
++    /// </summary>
++    public static (bool Success, bool Changed, string Message) EnsureRasterPmp(
++        string deviceName,
++        int targetDpi,
++        IReadOnlyList<(double Width, double Height)> extraMmSizes)
++    {
++        if (!IsSupportedRasterPlotter(deviceName))
++        {
++            return (false, false, "仅支持插件自有 LA_png/LA_jpg 栅格绘图仪。");
++        }
++
++        try
++        {
++            if (targetDpi != 150 && targetDpi != 300 && targetDpi != 600)
++            {
++                return (false, false, "栅格分辨率仅支持 150/300/600 DPI。");
++            }
++
++            var plottersDirectory = GetAutoCadPlotterDirectory();
++            if (string.IsNullOrWhiteSpace(plottersDirectory))
++            {
++                return (false, false, "未能定位 AutoCAD Plotters 目录。");
++            }
++
++            var pc3Path = ResolveActivePlotterPath(deviceName);
++            if (string.IsNullOrWhiteSpace(pc3Path) || !IsReadablePia2PlotterFile(pc3Path))
++            {
++                return (false, false, $"未找到可用的栅格绘图仪配置: {deviceName}。请检查 Plotters 目录。");
++            }
++
++            var pmpPath = ReadAttachedPmpPath(pc3Path);
++            if (string.IsNullOrWhiteSpace(pmpPath) || !IsReadablePia2PlotterFile(pmpPath))
++            {
++                pmpPath = Path.Combine(plottersDirectory, "PMP Files", Path.GetFileNameWithoutExtension(deviceName) + ".pmp");
++                if (!IsReadablePia2PlotterFile(pmpPath))
++                {
++                    var install = InstallRasterPlotter(deviceName, Path.GetFileName(pmpPath));
++                    if (!install.Installed)
++                    {
++                        return (false, false, "栅格绘图仪配置不完整: " + install.Message);
++                    }
++                }
++            }
++
++            var targetPapers = BuildRasterPaperSet(targetDpi, targetDpi, extraMmSizes);
++            if (TryReadRasterMediaDimensions(pmpPath, out var existing)
++                && PaperSetsEqual(existing, targetPapers))
++            {
++                return (true, false, $"栅格纸型已按 {targetDpi} DPI 就绪，共 {targetPapers.Count} 种。");
++            }
++
++            var token = Guid.NewGuid().ToString("N");
++            var tempPmp = pmpPath + ".dpi-" + token;
++            var backupPmp = pmpPath + ".backup-" + token;
++            try
++            {
++                if (TryWriteRasterPmpPia3(pmpPath, targetDpi, targetPapers, tempPmp))
++                {
++                    return CommitRasterPmp(pmpPath, tempPmp, backupPmp, targetDpi);
++                }
++
++                if (!TryWriteRasterPmpPia2(pmpPath, targetDpi, targetPapers, tempPmp))
++                {
++                    return (false, false, "重写栅格 PMP 失败：无法按 PIA2/PIA3 解析现有纸型配置。");
++                }
++
++                return CommitRasterPmp(pmpPath, tempPmp, backupPmp, targetDpi);
++            }
++            finally
++            {
++                DeleteTemporaryFile(tempPmp);
++                DeleteTemporaryFile(backupPmp);
++            }
++        }
++        catch (Exception ex)
++        {
++            return (false, false, "重写栅格 PMP 失败: " + ex.Message);
++        }
++    }
++
++    private static (bool Success, bool Changed, string Message) CommitRasterPmp(
++        string pmpPath, string tempPmp, string backupPmp, int targetDpi)
++    {
++        if (!TryReadRasterMediaDimensions(tempPmp, out var written)
++            || written.Count == 0)
++        {
++            return (false, false, "DPI 重写后的栅格 PMP 未通过完整性校验，已放弃替换。");
++        }
++
++        if (File.Exists(pmpPath))
++        {
++            File.Copy(pmpPath, backupPmp, overwrite: true);
++        }
++
++        File.Copy(tempPmp, pmpPath, overwrite: true);
++        if (!TryReadRasterMediaDimensions(pmpPath, out var final)
++            || final.Count == 0)
++        {
++            if (File.Exists(backupPmp))
++            {
++                File.Copy(backupPmp, pmpPath, overwrite: true);
++            }
++            return (false, false, "栅格 PMP 替换后校验失败，已回滚原配置。");
++        }
++
++        return (true, true, $"栅格纸型已按 {targetDpi} DPI 重写，共 {final.Count} 种像素纸。");
++    }
++
++    private static string? ResolveRasterPmpPath(string deviceName)
++    {
++        var pc3Path = ResolveActivePlotterPath(deviceName);
++        if (string.IsNullOrWhiteSpace(pc3Path) || !IsValidPlotterFile(pc3Path))
++        {
++            return null;
++        }
++
++        var attached = ReadAttachedPmpPath(pc3Path);
++        if (!string.IsNullOrWhiteSpace(attached) && File.Exists(attached))
++        {
++            return attached;
++        }
++
++        var plottersDirectory = GetAutoCadPlotterDirectory();
++        if (string.IsNullOrWhiteSpace(plottersDirectory))
++        {
++            return null;
++        }
++
++        var fallback = Path.Combine(plottersDirectory, "PMP Files", Path.GetFileNameWithoutExtension(deviceName) + ".pmp");
++        return File.Exists(fallback) ? fallback : null;
++    }
++
++    /// <summary>
++    /// 生成栅格 PMP 的完整像素纸型集合：标准 A4–A0 ×1/8 模数加长 × 横竖，以及调用方补充的自定义图框尺寸。
++    /// </summary>
++    private static List<RasterPaperSpec> BuildRasterPaperSet(
++        double dpiX,
++        double dpiY,
++        IReadOnlyList<(double Width, double Height)> extraMmSizes)
++    {
++        var papers = new List<RasterPaperSpec>();
++        var seen = new HashSet<string>(StringComparer.Ordinal);
++        foreach (var paper in RasterUserPapers(dpiX, dpiY))
++        {
++            if (seen.Add(PaperKey(paper)))
++            {
++                papers.Add(paper);
++            }
++        }
++
++        foreach (var (widthMm, heightMm) in extraMmSizes ?? Array.Empty<(double, double)>())
++        {
++            if (widthMm <= 0d || heightMm <= 0d)
++            {
++                continue;
++            }
++
++            var landscape = CreateRasterPaper(
++                $"自定义 {FormatMm(widthMm)}x{FormatMm(heightMm)}mm",
++                widthMm,
++                heightMm,
++                dpiX,
++                dpiY);
++            if (seen.Add(PaperKey(landscape)))
++            {
++                papers.Add(landscape);
++            }
++
++            var portrait = CreateRasterPaper(
++                $"自定义 {FormatMm(heightMm)}x{FormatMm(widthMm)}mm",
++                heightMm,
++                widthMm,
++                dpiX,
++                dpiY);
++            if (seen.Add(PaperKey(portrait)))
++            {
++                papers.Add(portrait);
++            }
++        }
++
++        return papers;
++
++        static string PaperKey(RasterPaperSpec paper)
++        {
++            return paper.WidthPixels + "x" + paper.HeightPixels;
++        }
++    }
++
++    private static bool TryWriteRasterPmpPia2(
++        string pmpPath,
++        int targetDpi,
++        IReadOnlyList<RasterPaperSpec> papers,
++        string tempPath)
++    {
++        try
++        {
++            var config = new PlotterConfiguration(pmpPath);
++            config.Remove("mod");
++            config.Remove("del");
++            config.Remove("udm");
++            config.Remove("hidden");
++            AddPia2RasterMediaContainers(config, targetDpi, targetDpi, papers);
++            config.Saves(tempPath);
++            return File.Exists(tempPath);
++        }
++        catch
++        {
++            return false;
++        }
++    }
++
++    private static bool TryWriteRasterPmpPia3(
++        string pmpPath,
++        int targetDpi,
++        IReadOnlyList<RasterPaperSpec> papers,
++        string tempPath)
++    {
++        try
++        {
++            var raw = File.ReadAllText(pmpPath);
++            if (!TryReadPia3Json(raw, out var root) || root["data"] is not JObject data)
++            {
++                return false;
++            }
++
++            data.Remove("mod");
++            data.Remove("del");
++            data.Remove("hidden");
++            data.Remove("udm");
++            AddPia3RasterUserMedia(data, targetDpi, targetDpi, papers);
++            File.WriteAllText(tempPath, "PIAFILEVERSION_3.0,json\n" + root.ToString(Formatting.Indented));
++            var writtenRaw = File.ReadAllText(tempPath);
++            return TryReadPia3Json(writtenRaw, out var writtenRoot)
++                   && writtenRoot["data"]?["udm"]?["media"]?["description"] is JObject { Count: > 0 };
++        }
++        catch
++        {
++            return false;
++        }
++    }
++
++    /// <summary>
++    /// 读取栅格 PMP 当前的像素纸型集合（media_bounds 像素口径）；PIA2/PIA3 均可解析。
++    /// </summary>
++    public static bool TryReadRasterMediaDimensions(
++        string pmpPath,
++        out List<(double Width, double Height)> result)
++    {
++        if (IsPia2PlotterFile(pmpPath) && TryReadPia2MediaDimensions(pmpPath, out result))
++        {
++            return true;
++        }
++
++        result = new List<(double, double)>();
++        try
++        {
++            var raw = File.ReadAllText(pmpPath);
++            if (!TryReadPia3Json(raw, out var root))
++            {
++                return false;
++            }
++
++            var descriptions = root["data"]?["udm"]?["media"]?["description"] as JObject;
++            if (descriptions == null)
++            {
++                return false;
++            }
++
++            foreach (var property in descriptions.Properties())
++            {
++                if (property.Value is not JObject description)
++                {
++                    continue;
++                }
++
++                var width = description.Value<double?>("media_bounds_urx") ?? 0d;
++                var height = description.Value<double?>("media_bounds_ury") ?? 0d;
++                if (width > 0d && height > 0d)
++                {
++                    result.Add((width, height));
++                }
++            }
++
++            return result.Count > 0;
++        }
++        catch
++        {
++            result.Clear();
++            return false;
++        }
++    }
++
++    private static bool PaperSetsEqual(
++        IReadOnlyList<(double Width, double Height)> existing,
++        IReadOnlyList<RasterPaperSpec> target)
++    {
++        var existingSet = existing
++            .Select(size => (int)Math.Round(size.Width) + "x" + (int)Math.Round(size.Height))
++            .ToHashSet(StringComparer.Ordinal);
++        var targetSet = target
++            .Select(paper => paper.WidthPixels + "x" + paper.HeightPixels)
++            .ToHashSet(StringComparer.Ordinal);
++        return existingSet.SetEquals(targetSet);
++    }
++
++    private static bool IsSupportedRasterPlotter(string deviceName)
++    {
++        var fileName = Path.GetFileName(deviceName ?? "");
++        return string.Equals(fileName, PreferredPngPlotter, StringComparison.OrdinalIgnoreCase)
++               || string.Equals(fileName, PreferredJpgPlotter, StringComparison.OrdinalIgnoreCase);
++    }
++
+     private static InstallResult InstallRasterPlotter(
+         string targetPlotterName,
+         string targetPmpName)
+@@ -1448,7 +1764,11 @@ public static class AcadPlotterInstaller
+         config.Add("hidden", "").Add("media", caps);
+     }
+ 
+-    private static void AddPia2RasterMediaContainers(PlotterConfiguration config, double dpiX, double dpiY)
++    private static void AddPia2RasterMediaContainers(
++        PlotterConfiguration config,
++        double dpiX,
++        double dpiY,
++        IReadOnlyList<RasterPaperSpec>? papers = null)
+     {
+         const string caps = "{\n"
+             + "abilities=\"500505500500505555000005550000000550000500000500555\n"
+@@ -1466,7 +1786,7 @@ public static class AcadPlotterInstaller
+         var size = media.Add("size");
+         var description = media.Add("description");
+         var index = 0;
+-        foreach (var paper in RasterUserPapers(dpiX, dpiY))
++        foreach (var paper in papers ?? RasterUserPapers(dpiX, dpiY))
+         {
+             var id = index.ToString(CultureInfo.InvariantCulture);
+             size.Add(id, CreatePia2RasterSizeText(id, paper));
+@@ -1507,7 +1827,11 @@ public static class AcadPlotterInstaller
+             + "dimensional=FALSE\n}";
+     }
+ 
+-    private static void AddPia3RasterUserMedia(JObject data, double dpiX, double dpiY)
++    private static void AddPia3RasterUserMedia(
++        JObject data,
++        double dpiX,
++        double dpiY,
++        IReadOnlyList<RasterPaperSpec>? papers = null)
+     {
+         var mediaCaps = CreateRasterMediaCaps();
+         data["mod"] = new JObject { ["media"] = mediaCaps.DeepClone() };
+@@ -1517,7 +1841,7 @@ public static class AcadPlotterInstaller
+         var descriptions = new JObject();
+         var sizes = new JObject();
+         var index = 0;
+-        foreach (var paper in RasterUserPapers(dpiX, dpiY))
++        foreach (var paper in papers ?? RasterUserPapers(dpiX, dpiY))
+         {
+             var id = index.ToString(CultureInfo.InvariantCulture);
+             descriptions[id] = CreatePia3RasterDescription(paper);
+diff --git a/src/AutoCAD/Plotter/PlotterService.Documents.cs b/src/AutoCAD/Plotter/PlotterService.Documents.cs
+index 8afa423..8323b1d 100644
+--- a/src/AutoCAD/Plotter/PlotterService.Documents.cs
++++ b/src/AutoCAD/Plotter/PlotterService.Documents.cs
+@@ -337,4 +337,140 @@ public static partial class PlotterService
+             throw new InvalidDataException("PDF 已生成但没有有效页面，已按打印失败处理: " + outputPath);
+         }
+     }
++
++    /** ValidateRasterOutputPixels：栅格输出像素与「图框毫米 × DPI ÷ 25.4」公式比对（±2%），作为扭曲/错纸的量化闸门。 */
++    private static void ValidateRasterOutputPixels(PlotJob job, string deviceName, string outputPath)
++    {
++        var (width, height) = ReadRasterDimensions(outputPath);
++        if (width <= 0 || height <= 0)
++        {
++            return;
++        }
++
++        var dpi = GetRasterTargetDpi(deviceName);
++        if (dpi <= 0)
++        {
++            return;
++        }
++
++        var targetLong = Math.Max(job.PaperWidthMm, job.PaperHeightMm) * dpi / 25.4;
++        var targetShort = Math.Min(job.PaperWidthMm, job.PaperHeightMm) * dpi / 25.4;
++        if (targetLong <= 0 || targetShort <= 0)
++        {
++            return; // 无图框毫米尺寸（如纯手动窗口）时不作尺寸断言，仍由文件头校验兜底。
++        }
++
++        var actualLong = Math.Max(width, height);
++        var actualShort = Math.Min(width, height);
++        const double tolerance = 0.02;
++        var longError = Math.Abs(actualLong - targetLong) / targetLong;
++        var shortError = Math.Abs(actualShort - targetShort) / targetShort;
++        if (longError <= tolerance && shortError <= tolerance)
++        {
++            return;
++        }
++
++        throw new InvalidDataException(
++            $"栅格输出像素与设定 {dpi} DPI 不符：期望 ≈{targetShort:0}×{targetLong:0}px，实际 {actualShort}×{actualLong}px"
++            + $"（误差 长边 {longError:P1}，短边 {shortError:P1}，容差 ±2%）。");
++    }
++
++    /** ReadRasterDimensions：读取 PNG（IHDR）或 JPG（SOF）的实际像素宽高；解析失败返回 0。 */
++    private static (int Width, int Height) ReadRasterDimensions(string outputPath)
++    {
++        try
++        {
++            var extension = Path.GetExtension(outputPath);
++            if (string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase))
++            {
++                return ReadPngDimensions(outputPath);
++            }
++
++            if (string.Equals(extension, ".jpg", StringComparison.OrdinalIgnoreCase)
++                || string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase))
++            {
++                return ReadJpgDimensions(outputPath);
++            }
++        }
++        catch
++        {
++            // 尺寸解析失败不阻断打印；文件有效性已由 ValidatePlotOutput 校验。
++        }
++
++        return (0, 0);
++    }
++
++    private static (int Width, int Height) ReadPngDimensions(string path)
++    {
++        using var stream = File.OpenRead(path);
++        var header = new byte[24];
++        if (stream.Read(header, 0, header.Length) != header.Length)
++        {
++            return (0, 0);
++        }
++
++        var width =
++            (header[16] << 24) | (header[17] << 16) | (header[18] << 8) | header[19];
++        var height =
++            (header[20] << 24) | (header[21] << 16) | (header[22] << 8) | header[23];
++        return (width, height);
++    }
++
++    private static (int Width, int Height) ReadJpgDimensions(string path)
++    {
++        using var stream = File.OpenRead(path);
++        var marker = new byte[2];
++        if (stream.Read(marker, 0, 2) != 2 || marker[0] != 0xFF || marker[1] != 0xD8)
++        {
++            return (0, 0); // 非 JPEG 文件
++        }
++
++        while (stream.Position < stream.Length - 1)
++        {
++            var byte0 = stream.ReadByte();
++            if (byte0 != 0xFF)
++            {
++                continue;
++            }
++
++            var byte1 = stream.ReadByte();
++            if (byte1 < 0)
++            {
++                break;
++            }
++
++            if (byte1 == 0xFF || byte1 == 0x00)
++            {
++                continue; // 填充字节
++            }
++
++            // SOF0..15 中排除 DHT(C4)/JPG(C8)/DAC(CC)
++            var isSof = byte1 >= 0xC0 && byte1 <= 0xCF
++                        && byte1 != 0xC4 && byte1 != 0xC8 && byte1 != 0xCC;
++            if (!isSof)
++            {
++                var length =
++                    (stream.ReadByte() << 8) | stream.ReadByte();
++                if (length < 2)
++                {
++                    break;
++                }
++
++                stream.Seek(length - 2, SeekOrigin.Current);
++                continue;
++            }
++
++            var sof = new byte[7];
++            if (stream.Read(sof, 0, 7) != 7)
++            {
++                return (0, 0);
++            }
++
++            var height = (sof[1] << 8) | sof[2];
++            var width = (sof[3] << 8) | sof[4];
++            return (width, height);
++        }
++
++        return (0, 0);
++    }
+ }
+diff --git a/src/AutoCAD/Plotter/PlotterService.Media.cs b/src/AutoCAD/Plotter/PlotterService.Media.cs
+index cd63bbc..7fd0904 100644
+--- a/src/AutoCAD/Plotter/PlotterService.Media.cs
++++ b/src/AutoCAD/Plotter/PlotterService.Media.cs
+@@ -218,7 +218,9 @@ public static partial class PlotterService
+         validator.RefreshLists(settings);
+         var isRaster = IsRasterPlotDevice(deviceName);
+         var paperUnit = isRaster ? PlotPaperUnit.Pixels : PlotPaperUnit.Millimeters;
+-        var dpi = isRaster ? AcadPlotterInstaller.GetRasterDpi(deviceName) : (X: 100d, Y: 100d);
++        // 栅格纸型统一按目标 DPI 生成/换算（默认 300），不再依赖 PC3 内驱动分辨率快照。
++        var rasterDpi = isRaster ? GetRasterTargetDpi(deviceName) : 100;
++        var dpi = (X: (double)rasterDpi, Y: (double)rasterDpi);
+         validator.SetPlotPaperUnits(settings, paperUnit);
+ 
+         var catalog = new List<MediaCatalogItem>();
+@@ -351,6 +353,21 @@ public static partial class PlotterService
+                || deviceName.IndexOf("JPEG", StringComparison.OrdinalIgnoreCase) >= 0;
+     }
+ 
++    /**
++     * GetRasterTargetDpi：PNG/JPG 统一输出 DPI（来自设置，默认 300）。
++     * 栅格纸型、毫米↔像素换算、1:1 等价比例全部以它为准；非栅格返回 0。
++     */
++    private static int GetRasterTargetDpi(string deviceName)
++    {
++        if (!IsRasterPlotDevice(deviceName))
++        {
++            return 0;
++        }
++
++        var dpi = AppSettingsStore.Load().RasterDpi;
++        return dpi == 150 || dpi == 300 || dpi == 600 ? dpi : 300;
++    }
++
+     /** EnsureRequiredMediaSize：校验写回后的介质尺寸是否仍满足任务要求。 */
+     private static void EnsureRequiredMediaSize(PlotSettings settings, MediaChoice media, string deviceName)
+     {
+@@ -489,7 +506,7 @@ public static partial class PlotterService
+         return TryParseMediaSize(mediaName);
+     }
+ 
+-    /** GetPlotPaperSizeMm：把当前纸张尺寸统一换算为毫米。 */
++    /** GetPlotPaperSizeMm：把当前纸张尺寸统一换算为毫米。栅格纸按目标 DPI 反算。 */
+     private static Point2d GetPlotPaperSizeMm(PlotSettings settings, string deviceName)
+     {
+         var size = settings.PlotPaperSize;
+@@ -498,10 +515,10 @@ public static partial class PlotterService
+             return size;
+         }
+ 
+-        var dpi = AcadPlotterInstaller.GetRasterDpi(deviceName);
++        var dpi = (double)GetRasterTargetDpi(deviceName);
+         return new Point2d(
+-            PixelsToMillimeters(size.X, dpi.X),
+-            PixelsToMillimeters(size.Y, dpi.Y));
++            PixelsToMillimeters(size.X, dpi),
++            PixelsToMillimeters(size.Y, dpi));
+     }
+ 
+     /** PixelsToMillimeters：像素按 DPI 换毫米（25.4/dpi）。 */
+diff --git a/src/AutoCAD/Plotter/PlotterService.Pipeline.cs b/src/AutoCAD/Plotter/PlotterService.Pipeline.cs
+index b9c6cbe..5c3bd8a 100644
+--- a/src/AutoCAD/Plotter/PlotterService.Pipeline.cs
++++ b/src/AutoCAD/Plotter/PlotterService.Pipeline.cs
+@@ -68,6 +68,10 @@ public static partial class PlotterService
+             tr.Commit();
+             WaitForPlotIdle();
+             ValidatePlotOutput(job.OutputPath);
++            if (IsRasterPlotDevice(deviceName))
++            {
++                ValidateRasterOutputPixels(job, deviceName, job.OutputPath);
++            }
+         }
+         finally
+         {
+diff --git a/src/AutoCAD/Plotter/PlotterService.Scale.cs b/src/AutoCAD/Plotter/PlotterService.Scale.cs
+index 099dedc..d34ef8e 100644
+--- a/src/AutoCAD/Plotter/PlotterService.Scale.cs
++++ b/src/AutoCAD/Plotter/PlotterService.Scale.cs
+@@ -47,7 +47,9 @@ public static partial class PlotterService
+     {
+         if (!job.LeavePaperMargin)
+         {
+-            if (job.UseExactWindowScale || hideOuterFrame)
++            // PNG/JPG 恒走「精确窗口」等比映射：目标像素 = 图框毫米 × DPI ÷ 25.4，
++            // 禁掉 ScaleToFit，从机制上消除长宽比不一致导致的非等比拉伸（扭曲）。
++            if (job.UseExactWindowScale || hideOuterFrame || IsRasterPlotDevice(deviceName))
+             {
+                 SetExactWindowScale(validator, settings, window, deviceName);
+                 return;
+@@ -166,11 +168,12 @@ public static partial class PlotterService
+ 
+         if (settings.PlotPaperUnits == PlotPaperUnit.Pixels)
+         {
+-            var dpi = AcadPlotterInstaller.GetRasterDpi(deviceName);
+-            var dpiValue = Math.Max(dpi.X, dpi.Y);
+-            if (dpiValue <= 0d)
++            // 栅格纸型像素 = 毫米 × DPI ÷ 25.4，比例换算同样使用目标 DPI（默认 300），
++            // 与纸型口径一致，避免“假想驱动分辨率”造成的整体缩放偏差。
++            var dpiValue = GetRasterTargetDpi(deviceName);
++            if (dpiValue <= 0)
+             {
+-                dpiValue = 100d;
++                dpiValue = 300;
+             }
+ 
+             return millimetersPerDrawingUnit * dpiValue / 25.4d;
+diff --git a/src/AutoCAD/Plotter/PlotterService.cs b/src/AutoCAD/Plotter/PlotterService.cs
+index 6d71011..50958ec 100644
+--- a/src/AutoCAD/Plotter/PlotterService.cs
++++ b/src/AutoCAD/Plotter/PlotterService.cs
+@@ -113,6 +113,8 @@ public static partial class PlotterService
+         var oldActive = CadApp.DocumentManager.MdiActiveDocument;
+ 
+         EnsureTextGeometryMode(deviceName, settings.ConvertTextToGeometryWhenPlotting);
++        // PNG/JPG：出图前按设置 DPI 重写栅格 PMP 像素纸型，并按批内图框尺寸补齐自定义像素纸。
++        EnsureRasterPmpForBatch(deviceName, jobs);
+         using var variables = PlotSystemVariables.Apply(settings.PlotTransparency);
+         try
+         {
+@@ -174,6 +176,7 @@ public static partial class PlotterService
+     {
+         var settings = AppSettingsStore.Load();
+         EnsureTextGeometryMode(deviceName, settings.ConvertTextToGeometryWhenPlotting);
++        EnsureRasterPmpForBatch(deviceName, new[] { job });
+         var oldActive = CadApp.DocumentManager.MdiActiveDocument;
+         var doc = IsCurrentDocumentJob(job, currentDocument) ? currentDocument : FindOpenDocument(job.SourceFile);
+         var shouldClose = doc == null;
+@@ -205,6 +208,49 @@ public static partial class PlotterService
+         }
+     }
+ 
++    /**
++     * EnsureRasterPmpForBatch：PNG/JPG 出图前确保栅格 PMP 纸型已按设置 DPI 就绪，
++     * 并把本批图框的毫米尺寸以精确像素纸（毫米 × DPI ÷ 25.4）一次性补入 PMP。
++     * 纸型集合未变化时不重写；重写后刷新设备列表并使介质缓存失效。
++     */
++    private static void EnsureRasterPmpForBatch(string deviceName, IReadOnlyList<PlotJob> jobs)
++    {
++        if (!IsRasterPlotDevice(deviceName) || jobs.Count == 0)
++        {
++            return;
++        }
++
++        var dpi = GetRasterTargetDpi(deviceName);
++        if (dpi <= 0)
++        {
++            return;
++        }
++
++        var sizes = jobs
++            .Where(job => job.PaperWidthMm > 0d && job.PaperHeightMm > 0d)
++            .Select(job => (Math.Round(job.PaperWidthMm, 4), Math.Round(job.PaperHeightMm, 4)))
++            .Distinct()
++            .ToList();
++        var outcome = AcadPlotterInstaller.EnsureRasterPmp(deviceName, dpi, sizes);
++        if (!outcome.Success)
++        {
++            throw new InvalidOperationException(outcome.Message);
++        }
++
++        if (!outcome.Changed)
++        {
++            return;
++        }
++
++        AcadPlotterInstaller.RefreshPlotterDevicesIfNeeded(true);
++        InvalidateMediaCatalog(deviceName);
++        // 首个作业带 CustomPaperWasAdded，使介质目录在一次设备重载后重建（逻辑沿用 PDF/DWF 自定义纸语义）。
++        foreach (var first in jobs.GroupBy(job => job.IsPaperSpace).Select(group => group.First()))
++        {
++            first.CustomPaperWasAdded = true;
++        }
++    }
++
+     /** GetGroupKey：生成分组键：当前文档 / 侧开 Database / 已打开文档路径。 */
+     private static string GetGroupKey(PlotJob job, Document currentDocument, AppSettings settings)
+     {
+diff --git a/src/Common/Models/AppSettingsStore.cs b/src/Common/Models/AppSettingsStore.cs
+index 43eb28e..f805abe 100644
+--- a/src/Common/Models/AppSettingsStore.cs
++++ b/src/Common/Models/AppSettingsStore.cs
+@@ -95,6 +95,11 @@ public sealed class AppSettings
+     /// 正式打印时是否输出对象透明度。默认开启，对应 CAD 打印对话框中的“打印透明度”。
+     /// </summary>
+     public bool PlotTransparency { get; set; } = true;
++    /// <summary>
++    /// PNG/JPG 栅格输出的统一分辨率（DPI），可选 150/300/600，默认 300。
++    /// PNG 与 JPG 共用同一设置；输出像素 = 图框毫米 × Dpi ÷ 25.4。
++    /// </summary>
++    public int RasterDpi { get; set; } = 300;
+     public bool AddFileNameSequence { get; set; }
+     public bool LeavePaperMargin { get; set; }
+     public double PaperMarginMm { get; set; } = 1;
+@@ -223,6 +228,12 @@ public static class AppSettingsStore
+             settings.LongPaperSnapToleranceMm = 3.0;
+         }
+ 
++        // PNG/JPG 统一分辨率只接受 150/300/600；异常值回退默认 300。
++        if (settings.RasterDpi != 150 && settings.RasterDpi != 300 && settings.RasterDpi != 600)
++        {
++            settings.RasterDpi = 300;
++        }
++
+         // 命令快捷键：去掉未知命令、非法别名和被多个命令重复占用的别名。
+         settings.CommandAliases = CommandAliasManager.NormalizeAliases(settings.CommandAliases);
+ 
+diff --git a/src/Common/Views/SettingsForm.cs b/src/Common/Views/SettingsForm.cs
+index 972954a..c179149 100644
+--- a/src/Common/Views/SettingsForm.cs
++++ b/src/Common/Views/SettingsForm.cs
+@@ -26,6 +26,7 @@ public sealed class SettingsForm : Form
+     private const string DefaultTextStyleDisplay = "(默认)";
+ 
+     private readonly NumericUpDown _paperTolerance = new();
++    private readonly ComboBox _rasterDpi = new();
+     private readonly CheckBox _recognizeFourLineRectangleFrames = new();
+     private readonly CheckBox _hideFrameBoundaryWhenPlotting = new();
+     private readonly ComboBox _longPaperNameFormat = new();
+@@ -168,7 +169,7 @@ public sealed class SettingsForm : Form
+             Dock = DockStyle.Top,
+             AutoSize = true,
+             ColumnCount = 1,
+-            RowCount = 6,
++            RowCount = 7,
+             Margin = Padding.Empty,
+             Padding = Padding.Empty
+         };
+@@ -278,12 +279,24 @@ public sealed class SettingsForm : Form
+         UiLayout.AddRow(completedActionTable, 0, "", _openOutputDirectoryAfterBatchPrint);
+         UiLayout.AddRow(completedActionTable, 1, "", _openMergedPdfAfterMerge);
+ 
++        _rasterDpi.DropDownStyle = ComboBoxStyle.DropDownList;
++        _rasterDpi.Width = UiLayout.Scale(140);
++        _rasterDpi.Margin = new Padding(0, UiLayout.Scale(2), 0, 0);
++        _rasterDpi.Items.AddRange(new object[] { 150, 300, 600 });
++        var rasterDpiTip = new ToolTip();
++        rasterDpiTip.SetToolTip(
++            _rasterDpi,
++            "PNG/JPG 输出的统一分辨率（DPI），默认 300。输出像素 = 图框毫米 × DPI ÷ 25.4；分辨率越高 PNG/JPG 越清晰，输出文件越大。");
++        var rasterTable = CreateSettingsTable(1);
++        UiLayout.AddRow(rasterTable, 0, "PNG/JPG 分辨率(DPI)", _rasterDpi);
++
+         categories.Controls.Add(CreateSettingsGroup("纸张匹配", paperTable), 0, 0);
+         categories.Controls.Add(CreateSettingsGroup("矩形框识别", frameRecognitionTable), 0, 1);
+         categories.Controls.Add(CreateSettingsGroup("打印行为", plotTable), 0, 2);
+-        categories.Controls.Add(CreateSettingsGroup("输出文件", outputTable), 0, 3);
+-        categories.Controls.Add(CreateSettingsGroup("PDF 合并", mergeTable), 0, 4);
+-        categories.Controls.Add(CreateSettingsGroup("完成后操作", completedActionTable), 0, 5);
++        categories.Controls.Add(CreateSettingsGroup("栅格输出(PNG/JPG)", rasterTable), 0, 3);
++        categories.Controls.Add(CreateSettingsGroup("输出文件", outputTable), 0, 4);
++        categories.Controls.Add(CreateSettingsGroup("PDF 合并", mergeTable), 0, 5);
++        categories.Controls.Add(CreateSettingsGroup("完成后操作", completedActionTable), 0, 6);
+         page.Controls.Add(categories);
+         return page;
+     }
+@@ -1158,6 +1171,9 @@ public sealed class SettingsForm : Form
+     private void Apply(AppSettings settings)
+     {
+         _paperTolerance.Value = UiLayout.Clamp(_paperTolerance, settings.PaperMatchToleranceMm);
++        _rasterDpi.SelectedItem = _rasterDpi.Items.Contains(settings.RasterDpi)
++            ? settings.RasterDpi
++            : 300;
+         _recognizeFourLineRectangleFrames.Checked = settings.RecognizeFourLineRectangleFrames;
+         _hideFrameBoundaryWhenPlotting.Checked = settings.HideFrameBoundaryWhenPlotting;
+         _plotTransparency.Checked = settings.PlotTransparency;
+@@ -1209,6 +1225,9 @@ public sealed class SettingsForm : Form
+         }
+ 
+         current.PaperMatchToleranceMm = (double)_paperTolerance.Value;
++        current.RasterDpi = _rasterDpi.SelectedItem is int dpi && (dpi == 150 || dpi == 300 || dpi == 600)
++            ? dpi
++            : 300;
+         current.RecognizeFourLineRectangleFrames = _recognizeFourLineRectangleFrames.Checked;
+         current.HideFrameBoundaryWhenPlotting = _hideFrameBoundaryWhenPlotting.Checked;
+         current.PlotTransparency = _plotTransparency.Checked;
