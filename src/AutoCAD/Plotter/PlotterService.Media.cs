@@ -82,9 +82,13 @@ public static partial class PlotterService
         // PNG/JPG 与 PDF 同一套选纸：目标毫米尺寸来自前端；目录项已把像素换算成毫米。
         // 仅在毫米匹配失败时才按长宽比兜底选像素画布（见下方 BestRasterMedia）。
         var matchTolerance = job.RequireExactPaperSize ? ExactMediaToleranceMm : MediaMatchToleranceMm;
+        var isRasterDevice = IsRasterPlotDevice(deviceName);
         var exact = choices
             .Where(x => x.Error <= matchTolerance)
             .OrderBy(x => x.Error)
+            // PNG/JPG：同向像素纸优先（横向图框→横向纸）。方向由纸型保证，配合恒 0 旋转出图，
+            // 不依赖光栅驱动的 plot rotation（DWG TO PNG/JPG 易忽略或在校验时回退导致反向输出）。
+            .ThenBy(x => isRasterDevice && (x.WidthMm >= x.HeightMm) != (targetWidth >= targetHeight) ? 1 : 0)
             .ThenBy(x => x.IsFullBleed ? 0 : 1)
             .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
