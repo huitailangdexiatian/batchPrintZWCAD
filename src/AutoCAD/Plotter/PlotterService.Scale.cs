@@ -47,7 +47,9 @@ public static partial class PlotterService
     {
         if (!job.LeavePaperMargin)
         {
-            if (job.UseExactWindowScale || hideOuterFrame)
+            // PNG/JPG 恒走「精确窗口」等比映射：目标像素 = 图框毫米 × DPI ÷ 25.4，
+            // 禁掉 ScaleToFit，从机制上消除长宽比不一致导致的非等比拉伸（扭曲）。
+            if (job.UseExactWindowScale || hideOuterFrame || IsRasterPlotDevice(deviceName))
             {
                 SetExactWindowScale(validator, settings, window, deviceName);
                 return;
@@ -166,11 +168,12 @@ public static partial class PlotterService
 
         if (settings.PlotPaperUnits == PlotPaperUnit.Pixels)
         {
-            var dpi = AcadPlotterInstaller.GetRasterDpi(deviceName);
-            var dpiValue = Math.Max(dpi.X, dpi.Y);
-            if (dpiValue <= 0d)
+            // 栅格纸型像素 = 毫米 × DPI ÷ 25.4，比例换算同样使用目标 DPI（默认 300），
+            // 与纸型口径一致，避免“假想驱动分辨率”造成的整体缩放偏差。
+            var dpiValue = GetRasterTargetDpi(deviceName);
+            if (dpiValue <= 0)
             {
-                dpiValue = 100d;
+                dpiValue = 300;
             }
 
             return millimetersPerDrawingUnit * dpiValue / 25.4d;

@@ -143,6 +143,320 @@ public static class AcadPlotterInstaller
         return InstallRasterPlotter(PreferredJpgPlotter, PreferredJpgPmp);
     }
 
+    /// <summary>
+    /// 按目标 DPI 重写 LA_png/LA_jpg 的 PMP 像素纸型目录，必要时补充自定义图框尺寸。
+    /// 原子替换 + 失败回滚；纸型集合与现值一致时返回 Changed=false。
+    /// 像素 = 毫米 × DPI ÷ 25.4，对应 MSteel “放大虚拟纸”的像素表达。
+    /// </summary>
+    public static (bool Success, bool Changed, string Message) EnsureRasterPmp(
+        string deviceName,
+        int targetDpi,
+        IReadOnlyList<(double Width, double Height)> extraMmSizes)
+    {
+        if (!IsSupportedRasterPlotter(deviceName))
+        {
+            return (false, false, "仅支持插件自有 LA_png/LA_jpg 栅格绘图仪。");
+        }
+
+        try
+        {
+            if (targetDpi != 150 && targetDpi != 300 && targetDpi != 600)
+            {
+                return (false, false, "栅格分辨率仅支持 150/300/600 DPI。");
+            }
+
+            var plottersDirectory = GetAutoCadPlotterDirectory();
+            if (string.IsNullOrWhiteSpace(plottersDirectory))
+            {
+                return (false, false, "未能定位 AutoCAD Plotters 目录。");
+            }
+
+            var pc3Path = ResolveActivePlotterPath(deviceName);
+            if (string.IsNullOrWhiteSpace(pc3Path) || !IsReadablePia2PlotterFile(pc3Path))
+            {
+                return (false, false, $"未找到可用的栅格绘图仪配置: {deviceName}。请检查 Plotters 目录。");
+            }
+
+            var pmpPath = ReadAttachedPmpPath(pc3Path);
+            if (string.IsNullOrWhiteSpace(pmpPath) || !IsReadablePia2PlotterFile(pmpPath))
+            {
+                pmpPath = Path.Combine(plottersDirectory, "PMP Files", Path.GetFileNameWithoutExtension(deviceName) + ".pmp");
+                if (!IsReadablePia2PlotterFile(pmpPath))
+                {
+                    var install = InstallRasterPlotter(deviceName, Path.GetFileName(pmpPath));
+                    if (!install.Installed)
+                    {
+                        return (false, false, "栅格绘图仪配置不完整: " + install.Message);
+                    }
+                }
+            }
+
+            var targetPapers = BuildRasterPaperSet(targetDpi, targetDpi, extraMmSizes);
+            if (TryReadRasterMediaDimensions(pmpPath, out var existing)
+                && PaperSetsEqual(existing, targetPapers))
+            {
+                return (true, false, $"栅格纸型已按 {targetDpi} DPI 就绪，共 {targetPapers.Count} 种。");
+            }
+
+            var token = Guid.NewGuid().ToString("N");
+            var tempPmp = pmpPath + ".dpi-" + token;
+            var backupPmp = pmpPath + ".backup-" + token;
+            try
+            {
+                if (TryWriteRasterPmpPia3(pmpPath, targetDpi, targetPapers, tempPmp))
+                {
+                    return CommitRasterPmp(pmpPath, tempPmp, backupPmp, targetDpi);
+                }
+
+                if (!TryWriteRasterPmpPia2(pmpPath, targetDpi, targetPapers, tempPmp))
+                {
+                    return (false, false, "重写栅格 PMP 失败：无法按 PIA2/PIA3 解析现有纸型配置。");
+                }
+
+                return CommitRasterPmp(pmpPath, tempPmp, backupPmp, targetDpi);
+            }
+            finally
+            {
+                DeleteTemporaryFile(tempPmp);
+                DeleteTemporaryFile(backupPmp);
+            }
+        }
+        catch (Exception ex)
+        {
+            return (false, false, "重写栅格 PMP 失败: " + ex.Message);
+        }
+    }
+
+    private static (bool Success, bool Changed, string Message) CommitRasterPmp(
+        string pmpPath, string tempPmp, string backupPmp, int targetDpi)
+    {
+        if (!TryReadRasterMediaDimensions(tempPmp, out var written)
+            || written.Count == 0)
+        {
+            return (false, false, "DPI 重写后的栅格 PMP 未通过完整性校验，已放弃替换。");
+        }
+
+        if (File.Exists(pmpPath))
+        {
+            File.Copy(pmpPath, backupPmp, overwrite: true);
+        }
+
+        File.Copy(tempPmp, pmpPath, overwrite: true);
+        if (!TryReadRasterMediaDimensions(pmpPath, out var final)
+            || final.Count == 0)
+        {
+            if (File.Exists(backupPmp))
+            {
+                File.Copy(backupPmp, pmpPath, overwrite: true);
+            }
+            return (false, false, "栅格 PMP 替换后校验失败，已回滚原配置。");
+        }
+
+        return (true, true, $"栅格纸型已按 {targetDpi} DPI 重写，共 {final.Count} 种像素纸。");
+    }
+
+    private static string? ResolveRasterPmpPath(string deviceName)
+    {
+        var pc3Path = ResolveActivePlotterPath(deviceName);
+        if (string.IsNullOrWhiteSpace(pc3Path) || !IsValidPlotterFile(pc3Path))
+        {
+            return null;
+        }
+
+        var attached = ReadAttachedPmpPath(pc3Path);
+        if (!string.IsNullOrWhiteSpace(attached) && File.Exists(attached))
+        {
+            return attached;
+        }
+
+        var plottersDirectory = GetAutoCadPlotterDirectory();
+        if (string.IsNullOrWhiteSpace(plottersDirectory))
+        {
+            return null;
+        }
+
+        var fallback = Path.Combine(plottersDirectory, "PMP Files", Path.GetFileNameWithoutExtension(deviceName) + ".pmp");
+        return File.Exists(fallback) ? fallback : null;
+    }
+
+    /// <summary>
+    /// 生成栅格 PMP 的完整像素纸型集合：标准 A4–A0 ×1/8 模数加长 × 横竖，以及调用方补充的自定义图框尺寸。
+    /// </summary>
+    private static List<RasterPaperSpec> BuildRasterPaperSet(
+        double dpiX,
+        double dpiY,
+        IReadOnlyList<(double Width, double Height)> extraMmSizes)
+    {
+        var papers = new List<RasterPaperSpec>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var paper in RasterUserPapers(dpiX, dpiY))
+        {
+            if (seen.Add(PaperKey(paper)))
+            {
+                papers.Add(paper);
+            }
+        }
+
+        foreach (var (widthMm, heightMm) in extraMmSizes ?? Array.Empty<(double, double)>())
+        {
+            if (widthMm <= 0d || heightMm <= 0d)
+            {
+                continue;
+            }
+
+            var landscape = CreateRasterPaper(
+                $"自定义 {FormatMm(widthMm)}x{FormatMm(heightMm)}mm",
+                widthMm,
+                heightMm,
+                dpiX,
+                dpiY);
+            if (seen.Add(PaperKey(landscape)))
+            {
+                papers.Add(landscape);
+            }
+
+            var portrait = CreateRasterPaper(
+                $"自定义 {FormatMm(heightMm)}x{FormatMm(widthMm)}mm",
+                heightMm,
+                widthMm,
+                dpiX,
+                dpiY);
+            if (seen.Add(PaperKey(portrait)))
+            {
+                papers.Add(portrait);
+            }
+        }
+
+        static string PaperKey(RasterPaperSpec paper)
+        {
+            return paper.WidthPixels + "x" + paper.HeightPixels;
+        }
+    }
+
+    private static bool TryWriteRasterPmpPia2(
+        string pmpPath,
+        int targetDpi,
+        IReadOnlyList<RasterPaperSpec> papers,
+        string tempPath)
+    {
+        try
+        {
+            var config = new PlotterConfiguration(pmpPath);
+            config.Remove("mod");
+            config.Remove("del");
+            config.Remove("udm");
+            config.Remove("hidden");
+            AddPia2RasterMediaContainers(config, targetDpi, targetDpi, papers);
+            config.Saves(tempPath);
+            return File.Exists(tempPath);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryWriteRasterPmpPia3(
+        string pmpPath,
+        int targetDpi,
+        IReadOnlyList<RasterPaperSpec> papers,
+        string tempPath)
+    {
+        try
+        {
+            var raw = File.ReadAllText(pmpPath);
+            if (!TryReadPia3Json(raw, out var root) || root["data"] is not JObject data)
+            {
+                return false;
+            }
+
+            data.Remove("mod");
+            data.Remove("del");
+            data.Remove("hidden");
+            data.Remove("udm");
+            AddPia3RasterUserMedia(data, targetDpi, targetDpi, papers);
+            File.WriteAllText(tempPath, "PIAFILEVERSION_3.0,json\n" + root.ToString(Formatting.Indented));
+            var writtenRaw = File.ReadAllText(tempPath);
+            return TryReadPia3Json(writtenRaw, out var writtenRoot)
+                   && writtenRoot["data"]?["udm"]?["media"]?["description"] is JObject { Count: > 0 };
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 读取栅格 PMP 当前的像素纸型集合（media_bounds 像素口径）；PIA2/PIA3 均可解析。
+    /// </summary>
+    public static bool TryReadRasterMediaDimensions(
+        string pmpPath,
+        out List<(double Width, double Height)> result)
+    {
+        if (IsPia2PlotterFile(pmpPath) && TryReadPia2MediaDimensions(pmpPath, out result))
+        {
+            return true;
+        }
+
+        result = new List<(double, double)>();
+        try
+        {
+            var raw = File.ReadAllText(pmpPath);
+            if (!TryReadPia3Json(raw, out var root))
+            {
+                return false;
+            }
+
+            var descriptions = root["data"]?["udm"]?["media"]?["description"] as JObject;
+            if (descriptions == null)
+            {
+                return false;
+            }
+
+            foreach (var property in descriptions.Properties())
+            {
+                if (property.Value is not JObject description)
+                {
+                    continue;
+                }
+
+                var width = description.Value<double?>("media_bounds_urx") ?? 0d;
+                var height = description.Value<double?>("media_bounds_ury") ?? 0d;
+                if (width > 0d && height > 0d)
+                {
+                    result.Add((width, height));
+                }
+            }
+
+            return result.Count > 0;
+        }
+        catch
+        {
+            result.Clear();
+            return false;
+        }
+    }
+
+    private static bool PaperSetsEqual(
+        IReadOnlyList<(double Width, double Height)> existing,
+        IReadOnlyList<RasterPaperSpec> target)
+    {
+        var existingSet = existing
+            .Select(size => (int)Math.Round(size.Width) + "x" + (int)Math.Round(size.Height))
+            .ToHashSet(StringComparer.Ordinal);
+        var targetSet = target
+            .Select(paper => paper.WidthPixels + "x" + paper.HeightPixels)
+            .ToHashSet(StringComparer.Ordinal);
+        return existingSet.SetEquals(targetSet);
+    }
+
+    private static bool IsSupportedRasterPlotter(string deviceName)
+    {
+        var fileName = Path.GetFileName(deviceName ?? "");
+        return string.Equals(fileName, PreferredPngPlotter, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(fileName, PreferredJpgPlotter, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static InstallResult InstallRasterPlotter(
         string targetPlotterName,
         string targetPmpName)
@@ -1448,7 +1762,11 @@ public static class AcadPlotterInstaller
         config.Add("hidden", "").Add("media", caps);
     }
 
-    private static void AddPia2RasterMediaContainers(PlotterConfiguration config, double dpiX, double dpiY)
+    private static void AddPia2RasterMediaContainers(
+        PlotterConfiguration config,
+        double dpiX,
+        double dpiY,
+        IReadOnlyList<RasterPaperSpec>? papers = null)
     {
         const string caps = "{\n"
             + "abilities=\"500505500500505555000005550000000550000500000500555\n"
@@ -1466,7 +1784,7 @@ public static class AcadPlotterInstaller
         var size = media.Add("size");
         var description = media.Add("description");
         var index = 0;
-        foreach (var paper in RasterUserPapers(dpiX, dpiY))
+        foreach (var paper in papers ?? RasterUserPapers(dpiX, dpiY))
         {
             var id = index.ToString(CultureInfo.InvariantCulture);
             size.Add(id, CreatePia2RasterSizeText(id, paper));
@@ -1507,7 +1825,11 @@ public static class AcadPlotterInstaller
             + "dimensional=FALSE\n}";
     }
 
-    private static void AddPia3RasterUserMedia(JObject data, double dpiX, double dpiY)
+    private static void AddPia3RasterUserMedia(
+        JObject data,
+        double dpiX,
+        double dpiY,
+        IReadOnlyList<RasterPaperSpec>? papers = null)
     {
         var mediaCaps = CreateRasterMediaCaps();
         data["mod"] = new JObject { ["media"] = mediaCaps.DeepClone() };
@@ -1517,7 +1839,7 @@ public static class AcadPlotterInstaller
         var descriptions = new JObject();
         var sizes = new JObject();
         var index = 0;
-        foreach (var paper in RasterUserPapers(dpiX, dpiY))
+        foreach (var paper in papers ?? RasterUserPapers(dpiX, dpiY))
         {
             var id = index.ToString(CultureInfo.InvariantCulture);
             descriptions[id] = CreatePia3RasterDescription(paper);

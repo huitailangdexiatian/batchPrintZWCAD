@@ -337,4 +337,140 @@ public static partial class PlotterService
             throw new InvalidDataException("PDF 已生成但没有有效页面，已按打印失败处理: " + outputPath);
         }
     }
+
+    /** ValidateRasterOutputPixels：栅格输出像素与「图框毫米 × DPI ÷ 25.4」公式比对（±2%），作为扭曲/错纸的量化闸门。 */
+    private static void ValidateRasterOutputPixels(PlotJob job, string deviceName, string outputPath)
+    {
+        var (width, height) = ReadRasterDimensions(outputPath);
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var dpi = GetRasterTargetDpi(deviceName);
+        if (dpi <= 0)
+        {
+            return;
+        }
+
+        var targetLong = Math.Max(job.PaperWidthMm, job.PaperHeightMm) * dpi / 25.4;
+        var targetShort = Math.Min(job.PaperWidthMm, job.PaperHeightMm) * dpi / 25.4;
+        if (targetLong <= 0 || targetShort <= 0)
+        {
+            return; // 无图框毫米尺寸（如纯手动窗口）时不作尺寸断言，仍由文件头校验兜底。
+        }
+
+        var actualLong = Math.Max(width, height);
+        var actualShort = Math.Min(width, height);
+        const double tolerance = 0.02;
+        var longError = Math.Abs(actualLong - targetLong) / targetLong;
+        var shortError = Math.Abs(actualShort - targetShort) / targetShort;
+        if (longError <= tolerance && shortError <= tolerance)
+        {
+            return;
+        }
+
+        throw new InvalidDataException(
+            $"栅格输出像素与设定 {dpi} DPI 不符：期望 ≈{targetShort:0}×{targetLong:0}px，实际 {actualShort}×{actualLong}px"
+            + $"（误差 长边 {longError:P1}，短边 {shortError:P1}，容差 ±2%）。");
+    }
+
+    /** ReadRasterDimensions：读取 PNG（IHDR）或 JPG（SOF）的实际像素宽高；解析失败返回 0。 */
+    private static (int Width, int Height) ReadRasterDimensions(string outputPath)
+    {
+        try
+        {
+            var extension = Path.GetExtension(outputPath);
+            if (string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase))
+            {
+                return ReadPngDimensions(outputPath);
+            }
+
+            if (string.Equals(extension, ".jpg", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase))
+            {
+                return ReadJpgDimensions(outputPath);
+            }
+        }
+        catch
+        {
+            // 尺寸解析失败不阻断打印；文件有效性已由 ValidatePlotOutput 校验。
+        }
+
+        return (0, 0);
+    }
+
+    private static (int Width, int Height) ReadPngDimensions(string path)
+    {
+        using var stream = File.OpenRead(path);
+        var header = new byte[24];
+        if (stream.Read(header, 0, header.Length) != header.Length)
+        {
+            return (0, 0);
+        }
+
+        var width =
+            (header[16] << 24) | (header[17] << 16) | (header[18] << 8) | header[19];
+        var height =
+            (header[20] << 24) | (header[21] << 16) | (header[22] << 8) | header[23];
+        return (width, height);
+    }
+
+    private static (int Width, int Height) ReadJpgDimensions(string path)
+    {
+        using var stream = File.OpenRead(path);
+        var marker = new byte[2];
+        if (stream.Read(marker, 0, 2) != 2 || marker[0] != 0xFF || marker[1] != 0xD8)
+        {
+            return (0, 0); // 非 JPEG 文件
+        }
+
+        while (stream.Position < stream.Length - 1)
+        {
+            var byte0 = stream.ReadByte();
+            if (byte0 != 0xFF)
+            {
+                continue;
+            }
+
+            var byte1 = stream.ReadByte();
+            if (byte1 < 0)
+            {
+                break;
+            }
+
+            if (byte1 == 0xFF || byte1 == 0x00)
+            {
+                continue; // 填充字节
+            }
+
+            // SOF0..15 中排除 DHT(C4)/JPG(C8)/DAC(CC)
+            var isSof = byte1 >= 0xC0 && byte1 <= 0xCF
+                        && byte1 != 0xC4 && byte1 != 0xC8 && byte1 != 0xCC;
+            if (!isSof)
+            {
+                var length =
+                    (stream.ReadByte() << 8) | stream.ReadByte();
+                if (length < 2)
+                {
+                    break;
+                }
+
+                stream.Seek(length - 2, SeekOrigin.Current);
+                continue;
+            }
+
+            var sof = new byte[7];
+            if (stream.Read(sof, 0, 7) != 7)
+            {
+                return (0, 0);
+            }
+
+            var height = (sof[1] << 8) | sof[2];
+            var width = (sof[3] << 8) | sof[4];
+            return (width, height);
+        }
+
+        return (0, 0);
+    }
 }

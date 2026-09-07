@@ -26,6 +26,7 @@ public sealed class SettingsForm : Form
     private const string DefaultTextStyleDisplay = "(默认)";
 
     private readonly NumericUpDown _paperTolerance = new();
+    private readonly ComboBox _rasterDpi = new();
     private readonly CheckBox _recognizeFourLineRectangleFrames = new();
     private readonly CheckBox _hideFrameBoundaryWhenPlotting = new();
     private readonly ComboBox _longPaperNameFormat = new();
@@ -168,7 +169,7 @@ public sealed class SettingsForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 7,
             Margin = Padding.Empty,
             Padding = Padding.Empty
         };
@@ -278,12 +279,24 @@ public sealed class SettingsForm : Form
         UiLayout.AddRow(completedActionTable, 0, "", _openOutputDirectoryAfterBatchPrint);
         UiLayout.AddRow(completedActionTable, 1, "", _openMergedPdfAfterMerge);
 
+        _rasterDpi.DropDownStyle = ComboBoxStyle.DropDownList;
+        _rasterDpi.Width = UiLayout.Scale(140);
+        _rasterDpi.Margin = new Padding(0, UiLayout.Scale(2), 0, 0);
+        _rasterDpi.Items.AddRange(new object[] { 150, 300, 600 });
+        var rasterDpiTip = new ToolTip();
+        rasterDpiTip.SetToolTip(
+            _rasterDpi,
+            "PNG/JPG 输出的统一分辨率（DPI），默认 300。输出像素 = 图框毫米 × DPI ÷ 25.4；分辨率越高 PNG/JPG 越清晰，输出文件越大。");
+        var rasterTable = CreateSettingsTable(1);
+        UiLayout.AddRow(rasterTable, 0, "PNG/JPG 分辨率(DPI)", _rasterDpi);
+
         categories.Controls.Add(CreateSettingsGroup("纸张匹配", paperTable), 0, 0);
         categories.Controls.Add(CreateSettingsGroup("矩形框识别", frameRecognitionTable), 0, 1);
         categories.Controls.Add(CreateSettingsGroup("打印行为", plotTable), 0, 2);
-        categories.Controls.Add(CreateSettingsGroup("输出文件", outputTable), 0, 3);
-        categories.Controls.Add(CreateSettingsGroup("PDF 合并", mergeTable), 0, 4);
-        categories.Controls.Add(CreateSettingsGroup("完成后操作", completedActionTable), 0, 5);
+        categories.Controls.Add(CreateSettingsGroup("栅格输出(PNG/JPG)", rasterTable), 0, 3);
+        categories.Controls.Add(CreateSettingsGroup("输出文件", outputTable), 0, 4);
+        categories.Controls.Add(CreateSettingsGroup("PDF 合并", mergeTable), 0, 5);
+        categories.Controls.Add(CreateSettingsGroup("完成后操作", completedActionTable), 0, 6);
         page.Controls.Add(categories);
         return page;
     }
@@ -1158,6 +1171,9 @@ public sealed class SettingsForm : Form
     private void Apply(AppSettings settings)
     {
         _paperTolerance.Value = UiLayout.Clamp(_paperTolerance, settings.PaperMatchToleranceMm);
+        _rasterDpi.SelectedItem = _rasterDpi.Items.Contains(settings.RasterDpi)
+            ? settings.RasterDpi
+            : 300;
         _recognizeFourLineRectangleFrames.Checked = settings.RecognizeFourLineRectangleFrames;
         _hideFrameBoundaryWhenPlotting.Checked = settings.HideFrameBoundaryWhenPlotting;
         _plotTransparency.Checked = settings.PlotTransparency;
@@ -1209,6 +1225,9 @@ public sealed class SettingsForm : Form
         }
 
         current.PaperMatchToleranceMm = (double)_paperTolerance.Value;
+        current.RasterDpi = _rasterDpi.SelectedItem is int dpi && (dpi == 150 || dpi == 300 || dpi == 600)
+            ? dpi
+            : 300;
         current.RecognizeFourLineRectangleFrames = _recognizeFourLineRectangleFrames.Checked;
         current.HideFrameBoundaryWhenPlotting = _hideFrameBoundaryWhenPlotting.Checked;
         current.PlotTransparency = _plotTransparency.Checked;

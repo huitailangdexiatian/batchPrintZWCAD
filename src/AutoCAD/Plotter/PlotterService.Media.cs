@@ -218,7 +218,9 @@ public static partial class PlotterService
         validator.RefreshLists(settings);
         var isRaster = IsRasterPlotDevice(deviceName);
         var paperUnit = isRaster ? PlotPaperUnit.Pixels : PlotPaperUnit.Millimeters;
-        var dpi = isRaster ? AcadPlotterInstaller.GetRasterDpi(deviceName) : (X: 100d, Y: 100d);
+        // 栅格纸型统一按目标 DPI 生成/换算（默认 300），不再依赖 PC3 内驱动分辨率快照。
+        var rasterDpi = isRaster ? GetRasterTargetDpi(deviceName) : 100;
+        var dpi = (X: (double)rasterDpi, Y: (double)rasterDpi);
         validator.SetPlotPaperUnits(settings, paperUnit);
 
         var catalog = new List<MediaCatalogItem>();
@@ -349,6 +351,21 @@ public static partial class PlotterService
         return deviceName.IndexOf("PNG", StringComparison.OrdinalIgnoreCase) >= 0
                || deviceName.IndexOf("JPG", StringComparison.OrdinalIgnoreCase) >= 0
                || deviceName.IndexOf("JPEG", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    /**
+     * GetRasterTargetDpi：PNG/JPG 统一输出 DPI（来自设置，默认 300）。
+     * 栅格纸型、毫米↔像素换算、1:1 等价比例全部以它为准；非栅格返回 0。
+     */
+    private static int GetRasterTargetDpi(string deviceName)
+    {
+        if (!IsRasterPlotDevice(deviceName))
+        {
+            return 0;
+        }
+
+        var dpi = AppSettingsStore.Load().RasterDpi;
+        return dpi == 150 || dpi == 300 || dpi == 600 ? dpi : 300;
     }
 
     /** EnsureRequiredMediaSize：校验写回后的介质尺寸是否仍满足任务要求。 */
@@ -489,7 +506,7 @@ public static partial class PlotterService
         return TryParseMediaSize(mediaName);
     }
 
-    /** GetPlotPaperSizeMm：把当前纸张尺寸统一换算为毫米。 */
+    /** GetPlotPaperSizeMm：把当前纸张尺寸统一换算为毫米。栅格纸按目标 DPI 反算。 */
     private static Point2d GetPlotPaperSizeMm(PlotSettings settings, string deviceName)
     {
         var size = settings.PlotPaperSize;
@@ -498,10 +515,10 @@ public static partial class PlotterService
             return size;
         }
 
-        var dpi = AcadPlotterInstaller.GetRasterDpi(deviceName);
+        var dpi = (double)GetRasterTargetDpi(deviceName);
         return new Point2d(
-            PixelsToMillimeters(size.X, dpi.X),
-            PixelsToMillimeters(size.Y, dpi.Y));
+            PixelsToMillimeters(size.X, dpi),
+            PixelsToMillimeters(size.Y, dpi));
     }
 
     /** PixelsToMillimeters：像素按 DPI 换毫米（25.4/dpi）。 */

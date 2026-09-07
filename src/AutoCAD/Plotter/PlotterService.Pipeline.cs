@@ -68,6 +68,10 @@ public static partial class PlotterService
             tr.Commit();
             WaitForPlotIdle();
             ValidatePlotOutput(job.OutputPath);
+            if (IsRasterPlotDevice(deviceName))
+            {
+                ValidateRasterOutputPixels(job, deviceName, job.OutputPath);
+            }
         }
         finally
         {

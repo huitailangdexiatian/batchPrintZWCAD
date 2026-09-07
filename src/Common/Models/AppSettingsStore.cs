@@ -95,6 +95,11 @@ public sealed class AppSettings
     /// 正式打印时是否输出对象透明度。默认开启，对应 CAD 打印对话框中的“打印透明度”。
     /// </summary>
     public bool PlotTransparency { get; set; } = true;
+    /// <summary>
+    /// PNG/JPG 栅格输出的统一分辨率（DPI），可选 150/300/600，默认 300。
+    /// PNG 与 JPG 共用同一设置；输出像素 = 图框毫米 × Dpi ÷ 25.4。
+    /// </summary>
+    public int RasterDpi { get; set; } = 300;
     public bool AddFileNameSequence { get; set; }
     public bool LeavePaperMargin { get; set; }
     public double PaperMarginMm { get; set; } = 1;
@@ -221,6 +226,12 @@ public static class AppSettingsStore
         if (settings.LongPaperSnapToleranceMm <= 0)
         {
             settings.LongPaperSnapToleranceMm = 3.0;
+        }
+
+        // PNG/JPG 统一分辨率只接受 150/300/600；异常值回退默认 300。
+        if (settings.RasterDpi != 150 && settings.RasterDpi != 300 && settings.RasterDpi != 600)
+        {
+            settings.RasterDpi = 300;
         }
 
         // 命令快捷键：去掉未知命令、非法别名和被多个命令重复占用的别名。

@@ -113,6 +113,8 @@ public static partial class PlotterService
         var oldActive = CadApp.DocumentManager.MdiActiveDocument;
 
         EnsureTextGeometryMode(deviceName, settings.ConvertTextToGeometryWhenPlotting);
+        // PNG/JPG：出图前按设置 DPI 重写栅格 PMP 像素纸型，并按批内图框尺寸补齐自定义像素纸。
+        EnsureRasterPmpForBatch(deviceName, jobs);
         using var variables = PlotSystemVariables.Apply(settings.PlotTransparency);
         try
         {
@@ -174,6 +176,7 @@ public static partial class PlotterService
     {
         var settings = AppSettingsStore.Load();
         EnsureTextGeometryMode(deviceName, settings.ConvertTextToGeometryWhenPlotting);
+        EnsureRasterPmpForBatch(deviceName, new[] { job });
         var oldActive = CadApp.DocumentManager.MdiActiveDocument;
         var doc = IsCurrentDocumentJob(job, currentDocument) ? currentDocument : FindOpenDocument(job.SourceFile);
         var shouldClose = doc == null;
@@ -202,6 +205,49 @@ public static partial class PlotterService
             {
                 CadApp.DocumentManager.MdiActiveDocument = oldActive;
             }
+        }
+    }
+
+    /**
+     * EnsureRasterPmpForBatch：PNG/JPG 出图前确保栅格 PMP 纸型已按设置 DPI 就绪，
+     * 并把本批图框的毫米尺寸以精确像素纸（毫米 × DPI ÷ 25.4）一次性补入 PMP。
+     * 纸型集合未变化时不重写；重写后刷新设备列表并使介质缓存失效。
+     */
+    private static void EnsureRasterPmpForBatch(string deviceName, IReadOnlyList<PlotJob> jobs)
+    {
+        if (!IsRasterPlotDevice(deviceName) || jobs.Count == 0)
+        {
+            return;
+        }
+
+        var dpi = GetRasterTargetDpi(deviceName);
+        if (dpi <= 0)
+        {
+            return;
+        }
+
+        var sizes = jobs
+            .Where(job => job.PaperWidthMm > 0d && job.PaperHeightMm > 0d)
+            .Select(job => (Math.Round(job.PaperWidthMm, 4), Math.Round(job.PaperHeightMm, 4)))
+            .Distinct()
+            .ToList();
+        var outcome = AcadPlotterInstaller.EnsureRasterPmp(deviceName, dpi, sizes);
+        if (!outcome.Success)
+        {
+            throw new InvalidOperationException(outcome.Message);
+        }
+
+        if (!outcome.Changed)
+        {
+            return;
+        }
+
+        AcadPlotterInstaller.RefreshPlotterDevicesIfNeeded(true);
+        InvalidateMediaCatalog(deviceName);
+        // 首个作业带 CustomPaperWasAdded，使介质目录在一次设备重载后重建（逻辑沿用 PDF/DWF 自定义纸语义）。
+        foreach (var first in jobs.GroupBy(job => job.IsPaperSpace).Select(group => group.First()))
+        {
+            first.CustomPaperWasAdded = true;
         }
     }
 
