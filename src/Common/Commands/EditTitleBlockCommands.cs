@@ -96,19 +96,60 @@ public sealed partial class BatchPlotCommands
             var worldFrame = TransformRegion(referenceFrame, match.BlockTransform);
             CenterEditorOnWorldExtents(editor, worldFrame);
 
-            var initialState = new FieldBoxSelectInitialState
+            var settings = AppSettingsStore.Load();
+
+            // 属性图框编辑：不回显/框选字段区域，改为展示块属性与关键字命中结果。
+            FieldBoxSelectInitialState? initialState = null;
+            List<AttributePreviewItem>? attributePreview = null;
+            if (existing.IsAttributeBased)
             {
-                TitleRegion = ResolveEditFieldRegion(existing.TitleRegion, mode, referenceFrame, inverse),
-                DrawingNumberRegion = ResolveEditFieldRegion(existing.DrawingNumberRegion, mode, referenceFrame, inverse),
-                DateRegion = ResolveEditFieldRegion(existing.DateRegion, mode, referenceFrame, inverse),
-                RevisionRegion = ResolveEditFieldRegion(existing.RevisionRegion, mode, referenceFrame, inverse),
-                PhaseRegion = ResolveEditFieldRegion(existing.PhaseRegion, mode, referenceFrame, inverse),
-                Info1Region = ResolveEditFieldRegion(existing.Info1Region, mode, referenceFrame, inverse),
-                Info2Region = ResolveEditFieldRegion(existing.Info2Region, mode, referenceFrame, inverse),
-                PaperName = existing.PaperName,
-                PaperWidthMm = existing.PaperWidthMm,
-                PaperHeightMm = existing.PaperHeightMm
-            };
+                List<(string Tag, string Value)> attributes;
+                using (var tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    var blockRef = (BlockReference)tr.GetObject(match.BlockReferenceId, OpenMode.ForRead);
+                    attributes = AttributeTitleBlockFieldExtractor.ReadAttributes(tr, blockRef);
+                    tr.Commit();
+                }
+
+                if (attributes.Count == 0)
+                {
+                    MessageBox.Show(
+                        $"当前图中找到的图框 {existing.BlockName} 不包含任何属性（Attribute），无法按属性图框编辑。",
+                        "图框信息库管理",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return false;
+                }
+
+                attributePreview = attributes
+                    .Select(a =>
+                    {
+                        var matchedFieldKey = AttributeTitleBlockFieldExtractor.FindMatchedFieldKey(
+                            a.Tag,
+                            settings.AttributeTitleBlockKeywords);
+                        return new AttributePreviewItem(
+                            a.Tag,
+                            a.Value,
+                            matchedFieldKey == null ? "" : AppSettingsStore.GetAttributeFieldDisplayName(matchedFieldKey));
+                    })
+                    .ToList();
+            }
+            else
+            {
+                initialState = new FieldBoxSelectInitialState
+                {
+                    TitleRegion = ResolveEditFieldRegion(existing.TitleRegion, mode, referenceFrame, inverse),
+                    DrawingNumberRegion = ResolveEditFieldRegion(existing.DrawingNumberRegion, mode, referenceFrame, inverse),
+                    DateRegion = ResolveEditFieldRegion(existing.DateRegion, mode, referenceFrame, inverse),
+                    RevisionRegion = ResolveEditFieldRegion(existing.RevisionRegion, mode, referenceFrame, inverse),
+                    PhaseRegion = ResolveEditFieldRegion(existing.PhaseRegion, mode, referenceFrame, inverse),
+                    Info1Region = ResolveEditFieldRegion(existing.Info1Region, mode, referenceFrame, inverse),
+                    Info2Region = ResolveEditFieldRegion(existing.Info2Region, mode, referenceFrame, inverse),
+                    PaperName = existing.PaperName,
+                    PaperWidthMm = existing.PaperWidthMm,
+                    PaperHeightMm = existing.PaperHeightMm
+                };
+            }
 
             var placedFrame = RectangleGeometry.TransformRectangle(referenceFrame, match.BlockTransform);
             var detectedWidth = placedFrame.ActualWidth > 0
@@ -117,7 +158,6 @@ public sealed partial class BatchPlotCommands
             var detectedHeight = placedFrame.ActualHeight > 0
                 ? placedFrame.ActualHeight
                 : worldFrame.MaxPoint.Y - worldFrame.MinPoint.Y;
-            var settings = AppSettingsStore.Load();
             var paperDetectionOptions = PaperSizeDetector.CreateRectangleBatchOptions(
                 settings.PaperMatchToleranceMm,
                 match.IsPaperSpace,
@@ -152,9 +192,12 @@ public sealed partial class BatchPlotCommands
                 referenceFrame,
                 paperOptions,
                 paperDetectionOptions,
-                initialState);
+                initialState,
+                attributePreview);
 
-            editor.WriteMessage($"\n已定位图框 {existing.BlockName}，红色临时框显示当前已配置字段，可点击对应‘框选’修改。");
+            editor.WriteMessage(existing.IsAttributeBased
+                ? $"\n已定位属性图框 {existing.BlockName}，红色临时框为打印边界，可在弹出窗口中修改并核对属性关键字命中情况。"
+                : $"\n已定位图框 {existing.BlockName}，红色临时框显示当前已配置字段，可点击对应‘框选’修改。");
             CadWindowFocus.ActivateCadWindow();
             if (ShowModalDialog(dialog) != DialogResult.OK)
             {
@@ -167,6 +210,7 @@ public sealed partial class BatchPlotCommands
             var updated = new TitleBlockDefinition
             {
                 BlockName = existing.BlockName,
+                IsAttributeBased = existing.IsAttributeBased,
                 HasPrintRegion = true,
                 CoordinateMode = usesVariableLengthTemplate
                     ? TitleBlockDefinition.DynamicRightBottomCoordinateMode
@@ -175,13 +219,13 @@ public sealed partial class BatchPlotCommands
                 PaperName = dialog.PaperName,
                 PaperWidthMm = dialog.PaperWidthMm,
                 PaperHeightMm = dialog.PaperHeightMm,
-                TitleRegion = ToStoredFrameRelative(dialog.TitleRegion, referenceFrame, usesVariableLengthTemplate),
-                DrawingNumberRegion = ToStoredFrameRelative(dialog.DrawingNumberRegion, referenceFrame, usesVariableLengthTemplate),
-                DateRegion = ToOptionalStoredFrameRelative(dialog.DateRegion, referenceFrame, usesVariableLengthTemplate),
-                RevisionRegion = ToOptionalStoredFrameRelative(dialog.RevisionRegion, referenceFrame, usesVariableLengthTemplate),
-                PhaseRegion = ToOptionalStoredFrameRelative(dialog.PhaseRegion, referenceFrame, usesVariableLengthTemplate),
-                Info1Region = ToOptionalStoredFrameRelative(dialog.Info1Region, referenceFrame, usesVariableLengthTemplate),
-                Info2Region = ToOptionalStoredFrameRelative(dialog.Info2Region, referenceFrame, usesVariableLengthTemplate),
+                TitleRegion = existing.IsAttributeBased ? new LocalRectangle() : ToStoredFrameRelative(dialog.TitleRegion, referenceFrame, usesVariableLengthTemplate),
+                DrawingNumberRegion = existing.IsAttributeBased ? new LocalRectangle() : ToStoredFrameRelative(dialog.DrawingNumberRegion, referenceFrame, usesVariableLengthTemplate),
+                DateRegion = existing.IsAttributeBased ? new LocalRectangle() : ToOptionalStoredFrameRelative(dialog.DateRegion, referenceFrame, usesVariableLengthTemplate),
+                RevisionRegion = existing.IsAttributeBased ? new LocalRectangle() : ToOptionalStoredFrameRelative(dialog.RevisionRegion, referenceFrame, usesVariableLengthTemplate),
+                PhaseRegion = existing.IsAttributeBased ? new LocalRectangle() : ToOptionalStoredFrameRelative(dialog.PhaseRegion, referenceFrame, usesVariableLengthTemplate),
+                Info1Region = existing.IsAttributeBased ? new LocalRectangle() : ToOptionalStoredFrameRelative(dialog.Info1Region, referenceFrame, usesVariableLengthTemplate),
+                Info2Region = existing.IsAttributeBased ? new LocalRectangle() : ToOptionalStoredFrameRelative(dialog.Info2Region, referenceFrame, usesVariableLengthTemplate),
                 CreatedAt = existing.CreatedAt == default ? now : existing.CreatedAt,
                 UpdatedAt = now
             };

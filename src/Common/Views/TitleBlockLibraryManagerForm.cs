@@ -22,18 +22,31 @@ using CadApp = ZwSoft.ZwCAD.ApplicationServices.Application;
 
 namespace ZwcadBatchPlot;
 
+/// <summary>
+/// 图框信息库管理：标签 1 常规图框（字段按区域框选提取），标签 2 属性图框（字段按关键字从块属性提取）。
+/// 两个标签共享同一份图框库数据，按 IsAttributeBased 分流展示；块名在两类图框间全局唯一。
+/// </summary>
 public sealed class TitleBlockLibraryManagerForm : Form
 {
     private readonly BindingList<TitleBlockRow> _rows = new();
-    private readonly BindingList<TitleBlockRow> _displayRows = new();
-    private readonly DataGridView _grid = new();
+    private readonly DataGridView _regularGrid = new();
+    private readonly DataGridView _attributeGrid = new();
     private readonly Label _status = new();
     private readonly ContextMenuStrip _rowMenu = new();
+    private readonly TabControl _tabs = new();
     private bool _loading;
     private bool _dirty;
-    private int _sortColumnIndex = -1;
-    private ListSortDirection _sortDirection = ListSortDirection.Ascending;
-    private HashSet<string> _presentBlockNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<DataGridView, GridState> _gridStates = new();
+
+    /// <summary>单个标签页的网格与其独立的排序状态、绑定列表。</summary>
+    private sealed class GridState
+    {
+        public DataGridView Grid = null!;
+        public BindingList<TitleBlockRow> DisplayRows = new();
+        public bool IsAttributeTab;
+        public int SortColumnIndex = -1;
+        public ListSortDirection SortDirection = ListSortDirection.Ascending;
+    }
 
     public bool LibraryChanged { get; private set; }
 
@@ -107,38 +120,60 @@ public sealed class TitleBlockLibraryManagerForm : Form
         top.Controls.Add(openFolderButton);
         top.Controls.Add(closeButton);
 
-        UiLayout.StyleGrid(_grid, Font);
-        AddColumns();
-        _grid.DataSource = _displayRows;
-        _grid.ColumnHeaderMouseClick += GridColumnHeaderMouseClick;
-        _grid.CellDoubleClick += (_, e) =>
+        _tabs.Dock = DockStyle.Fill;
+
+        var regularState = new GridState { Grid = _regularGrid, IsAttributeTab = false };
+        var attributeState = new GridState { Grid = _attributeGrid, IsAttributeTab = true };
+        _gridStates[_regularGrid] = regularState;
+        _gridStates[_attributeGrid] = attributeState;
+
+        UiLayout.StyleGrid(_regularGrid, Font);
+        UiLayout.StyleGrid(_attributeGrid, Font);
+        AddRegularColumns();
+        AddAttributeColumns();
+        _regularGrid.DataSource = regularState.DisplayRows;
+        _attributeGrid.DataSource = attributeState.DisplayRows;
+
+        var regularTab = new TabPage("常规图框") { Padding = new Padding(0) };
+        regularTab.Controls.Add(_regularGrid);
+        var attributeTab = new TabPage("属性图框") { Padding = new Padding(0) };
+        attributeTab.Controls.Add(_attributeGrid);
+        _tabs.TabPages.Add(regularTab);
+        _tabs.TabPages.Add(attributeTab);
+
+        foreach (var state in _gridStates.Values)
         {
-            if (e.RowIndex >= 0)
+            var grid = state.Grid;
+            grid.ColumnHeaderMouseClick += GridColumnHeaderMouseClick;
+            grid.CellDoubleClick += (_, e) =>
             {
-                EditSelectedDefinition();
-            }
-        };
-        _grid.CellMouseDown += GridCellMouseDown;
-        _grid.CellValueChanged += (_, _) => MarkDirty();
-        _grid.CurrentCellDirtyStateChanged += (_, _) =>
-        {
-            if (_grid.IsCurrentCellDirty)
+                if (e.RowIndex >= 0)
+                {
+                    EditSelectedDefinition();
+                }
+            };
+            grid.CellMouseDown += GridCellMouseDown;
+            grid.CellValueChanged += (_, _) => MarkDirty();
+            grid.CurrentCellDirtyStateChanged += (_, _) =>
             {
-                _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
-            }
-        };
-        _grid.DataError += (_, e) =>
-        {
-            e.ThrowException = false;
-            MessageBox.Show("输入值格式不正确，请输入有效的数字。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        };
+                if (grid.IsCurrentCellDirty)
+                {
+                    grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+                }
+            };
+            grid.DataError += (_, e) =>
+            {
+                e.ThrowException = false;
+                MessageBox.Show("输入值格式不正确，请输入有效的数字。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            };
+            grid.RowPrePaint += GridRowPrePaint;
+            grid.ContextMenuStrip = _rowMenu;
+        }
 
         var editItem = _rowMenu.Items.Add("编辑");
         editItem.Click += (_, _) => EditSelectedDefinition();
-        _rowMenu.Opening += (_, e) => e.Cancel = _grid.SelectedRows.Count == 0;
-        _grid.ContextMenuStrip = _rowMenu;
+        _rowMenu.Opening += (_, e) => e.Cancel = ActiveGrid.SelectedRows.Count == 0;
 
-        _grid.RowPrePaint += GridRowPrePaint;
         Activated += (_, _) => RefreshPresentBlocks();
 
         _status.Dock = DockStyle.Bottom;
@@ -146,55 +181,84 @@ public sealed class TitleBlockLibraryManagerForm : Form
         _status.TextAlign = ContentAlignment.MiddleLeft;
         _status.Padding = new Padding(UiLayout.Scale(8), 0, 0, 0);
 
-        Controls.Add(_grid);
+        Controls.Add(_tabs);
         Controls.Add(_status);
         Controls.Add(top);
     }
 
-    private void AddColumns()
-    {
-        _grid.Columns.Clear();
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.BlockName), HeaderText = "块名", Width = UiLayout.Scale(190) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.CreatedAt), HeaderText = "加入时间", Width = UiLayout.Scale(170), ReadOnly = true });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperName), HeaderText = "图幅", Width = UiLayout.Scale(80) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperWidthMm), HeaderText = "纸宽mm", Width = UiLayout.Scale(90) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperHeightMm), HeaderText = "纸高mm", Width = UiLayout.Scale(90) });
-        _grid.Columns.Add(new DataGridViewCheckBoxColumn { DataPropertyName = nameof(TitleBlockRow.HasPrintRegion), HeaderText = "有打印边界", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMinX), HeaderText = "边界MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMinY), HeaderText = "边界MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMaxX), HeaderText = "边界MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMaxY), HeaderText = "边界MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMinX), HeaderText = "图名MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMinY), HeaderText = "图名MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMaxX), HeaderText = "图名MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMaxY), HeaderText = "图名MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMinX), HeaderText = "图号MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMinY), HeaderText = "图号MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMaxX), HeaderText = "图号MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMaxY), HeaderText = "图号MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMinX), HeaderText = "日期MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMinY), HeaderText = "日期MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMaxX), HeaderText = "日期MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMaxY), HeaderText = "日期MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMinX), HeaderText = "版次MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMinY), HeaderText = "版次MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMaxX), HeaderText = "版次MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMaxY), HeaderText = "版次MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMinX), HeaderText = "设计阶段MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMinY), HeaderText = "设计阶段MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMaxX), HeaderText = "设计阶段MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMaxY), HeaderText = "设计阶段MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MinX), HeaderText = "信息1MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MinY), HeaderText = "信息1MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MaxX), HeaderText = "信息1MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MaxY), HeaderText = "信息1MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MinX), HeaderText = "信息2MinX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MinY), HeaderText = "信息2MinY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MaxX), HeaderText = "信息2MaxX", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MaxY), HeaderText = "信息2MaxY", Width = UiLayout.Scale(96) });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.UpdatedAt), HeaderText = "更新时间", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = UiLayout.Scale(170), ReadOnly = true });
+    /// <summary>当前激活标签页的网格；删除、编辑等行级操作只作用于它。</summary>
+    private DataGridView ActiveGrid => ReferenceEquals(_tabs.SelectedTab?.Controls[0], _attributeGrid)
+        ? _attributeGrid
+        : _regularGrid;
 
-        foreach (DataGridViewColumn column in _grid.Columns)
+    private GridState StateOf(DataGridView grid) => _gridStates[grid];
+
+    private void AddRegularColumns()
+    {
+        _regularGrid.Columns.Clear();
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.BlockName), HeaderText = "块名", Width = UiLayout.Scale(190) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.CreatedAt), HeaderText = "加入时间", Width = UiLayout.Scale(170), ReadOnly = true });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperName), HeaderText = "图幅", Width = UiLayout.Scale(80) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperWidthMm), HeaderText = "纸宽mm", Width = UiLayout.Scale(90) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperHeightMm), HeaderText = "纸高mm", Width = UiLayout.Scale(90) });
+        _regularGrid.Columns.Add(new DataGridViewCheckBoxColumn { DataPropertyName = nameof(TitleBlockRow.HasPrintRegion), HeaderText = "有打印边界", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMinX), HeaderText = "边界MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMinY), HeaderText = "边界MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMaxX), HeaderText = "边界MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMaxY), HeaderText = "边界MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMinX), HeaderText = "图名MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMinY), HeaderText = "图名MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMaxX), HeaderText = "图名MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.TitleMaxY), HeaderText = "图名MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMinX), HeaderText = "图号MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMinY), HeaderText = "图号MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMaxX), HeaderText = "图号MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.NumberMaxY), HeaderText = "图号MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMinX), HeaderText = "日期MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMinY), HeaderText = "日期MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMaxX), HeaderText = "日期MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.DateMaxY), HeaderText = "日期MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMinX), HeaderText = "版次MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMinY), HeaderText = "版次MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMaxX), HeaderText = "版次MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.RevisionMaxY), HeaderText = "版次MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMinX), HeaderText = "设计阶段MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMinY), HeaderText = "设计阶段MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMaxX), HeaderText = "设计阶段MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PhaseMaxY), HeaderText = "设计阶段MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MinX), HeaderText = "信息1MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MinY), HeaderText = "信息1MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MaxX), HeaderText = "信息1MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info1MaxY), HeaderText = "信息1MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MinX), HeaderText = "信息2MinX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MinY), HeaderText = "信息2MinY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MaxX), HeaderText = "信息2MaxX", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.Info2MaxY), HeaderText = "信息2MaxY", Width = UiLayout.Scale(96) });
+        _regularGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.UpdatedAt), HeaderText = "更新时间", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = UiLayout.Scale(170), ReadOnly = true });
+
+        foreach (DataGridViewColumn column in _regularGrid.Columns)
+        {
+            column.SortMode = DataGridViewColumnSortMode.Programmatic;
+        }
+    }
+
+    /// <summary>属性图框字段值来自块属性而非框选区域，不展示 36 个区域坐标列。</summary>
+    private void AddAttributeColumns()
+    {
+        _attributeGrid.Columns.Clear();
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.BlockName), HeaderText = "块名", Width = UiLayout.Scale(200) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.CreatedAt), HeaderText = "加入时间", Width = UiLayout.Scale(170), ReadOnly = true });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperName), HeaderText = "图幅", Width = UiLayout.Scale(90) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperWidthMm), HeaderText = "纸宽mm", Width = UiLayout.Scale(90) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PaperHeightMm), HeaderText = "纸高mm", Width = UiLayout.Scale(90) });
+        _attributeGrid.Columns.Add(new DataGridViewCheckBoxColumn { DataPropertyName = nameof(TitleBlockRow.HasPrintRegion), HeaderText = "有打印边界", Width = UiLayout.Scale(96) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMinX), HeaderText = "边界MinX", Width = UiLayout.Scale(110) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMinY), HeaderText = "边界MinY", Width = UiLayout.Scale(110) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMaxX), HeaderText = "边界MaxX", Width = UiLayout.Scale(110) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.PrintMaxY), HeaderText = "边界MaxY", Width = UiLayout.Scale(110) });
+        _attributeGrid.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = nameof(TitleBlockRow.UpdatedAt), HeaderText = "更新时间", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = UiLayout.Scale(170), ReadOnly = true });
+
+        foreach (DataGridViewColumn column in _attributeGrid.Columns)
         {
             column.SortMode = DataGridViewColumnSortMode.Programmatic;
         }
@@ -250,7 +314,8 @@ public sealed class TitleBlockLibraryManagerForm : Form
 
     private void DeleteSelected()
     {
-        if (_grid.SelectedRows.Count == 0)
+        var grid = ActiveGrid;
+        if (grid.SelectedRows.Count == 0)
         {
             return;
         }
@@ -260,7 +325,7 @@ public sealed class TitleBlockLibraryManagerForm : Form
             return;
         }
 
-        var selected = _grid.SelectedRows
+        var selected = grid.SelectedRows
             .Cast<DataGridViewRow>()
             .Select(row => row.DataBoundItem)
             .OfType<TitleBlockRow>()
@@ -279,6 +344,11 @@ public sealed class TitleBlockLibraryManagerForm : Form
 
     private void GridCellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
     {
+        if (sender is not DataGridView grid)
+        {
+            return;
+        }
+
         if (e.Button != MouseButtons.Right)
         {
             return;
@@ -286,23 +356,24 @@ public sealed class TitleBlockLibraryManagerForm : Form
 
         if (e.RowIndex < 0)
         {
-            _grid.ClearSelection();
+            grid.ClearSelection();
             return;
         }
 
         // 右键所在行必须先成为当前选择，否则菜单“编辑”可能作用到此前选中的另一条记录。
-        _grid.ClearSelection();
-        _grid.Rows[e.RowIndex].Selected = true;
+        grid.ClearSelection();
+        grid.Rows[e.RowIndex].Selected = true;
         if (e.ColumnIndex >= 0)
         {
-            _grid.CurrentCell = _grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+            grid.CurrentCell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
         }
     }
 
     private void EditSelectedDefinition()
     {
-        _grid.EndEdit();
-        var row = _grid.SelectedRows
+        var grid = ActiveGrid;
+        grid.EndEdit();
+        var row = grid.SelectedRows
             .Cast<DataGridViewRow>()
             .Select(item => item.DataBoundItem)
             .OfType<TitleBlockRow>()
@@ -346,6 +417,8 @@ public sealed class TitleBlockLibraryManagerForm : Form
             CadWindowFocus.RestoreDialog(this);
         }
     }
+
+    private HashSet<string> _presentBlockNames = new(StringComparer.OrdinalIgnoreCase);
 
     private void RefreshPresentBlocks()
     {
@@ -393,13 +466,15 @@ public sealed class TitleBlockLibraryManagerForm : Form
             // 无激活文档或图纸不可读时不报错，列表行仅不回显粉色。
         }
 
-        _grid.Invalidate();
+        _regularGrid.Invalidate();
+        _attributeGrid.Invalidate();
     }
 
     private void GridRowPrePaint(object? sender, DataGridViewRowPrePaintEventArgs e)
     {
-        if (e.RowIndex < 0
-            || _grid.Rows[e.RowIndex].DataBoundItem is not TitleBlockRow row
+        if (sender is not DataGridView grid
+            || e.RowIndex < 0
+            || grid.Rows[e.RowIndex].DataBoundItem is not TitleBlockRow row
             || string.IsNullOrWhiteSpace(row.BlockName)
             || !_presentBlockNames.Contains(row.BlockName))
         {
@@ -408,60 +483,66 @@ public sealed class TitleBlockLibraryManagerForm : Form
 
         // 当前 CAD 中已存在的图框整行淡粉色，方便用户快速认出新录入条目
         using var brush = new SolidBrush(Color.FromArgb(255, 230, 230));
-        for (var col = 0; col < _grid.Columns.Count; col++)
+        for (var col = 0; col < grid.Columns.Count; col++)
         {
-            _grid.Rows[e.RowIndex].Cells[col].Style.BackColor = Color.FromArgb(255, 230, 230);
+            grid.Rows[e.RowIndex].Cells[col].Style.BackColor = Color.FromArgb(255, 230, 230);
         }
     }
 
     private void GridColumnHeaderMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
     {
-        if (e.ColumnIndex < 0 || e.ColumnIndex >= _grid.Columns.Count)
+        if (sender is not DataGridView grid
+            || e.ColumnIndex < 0
+            || e.ColumnIndex >= grid.Columns.Count)
         {
             return;
         }
 
+        var state = StateOf(grid);
         // 同一列表头再次点击时切换升序/降序；切换到其他列时从升序开始。
-        if (_sortColumnIndex == e.ColumnIndex)
+        if (state.SortColumnIndex == e.ColumnIndex)
         {
-            _sortDirection = _sortDirection == ListSortDirection.Ascending
+            state.SortDirection = state.SortDirection == ListSortDirection.Ascending
                 ? ListSortDirection.Descending
                 : ListSortDirection.Ascending;
         }
         else
         {
-            _sortColumnIndex = e.ColumnIndex;
-            _sortDirection = ListSortDirection.Ascending;
+            state.SortColumnIndex = e.ColumnIndex;
+            state.SortDirection = ListSortDirection.Ascending;
         }
 
-        _grid.EndEdit();
+        grid.EndEdit();
         RefreshDisplayRows();
     }
 
     private void RefreshDisplayRows()
     {
-        IEnumerable<TitleBlockRow> rows = _rows;
-        if (_sortColumnIndex >= 0 && _sortColumnIndex < _grid.Columns.Count)
-        {
-            var propertyName = _grid.Columns[_sortColumnIndex].DataPropertyName;
-            var property = TypeDescriptor.GetProperties(typeof(TitleBlockRow))[propertyName];
-            if (property != null)
-            {
-                var comparer = Comparer<TitleBlockRow>.Create((left, right) =>
-                    CompareSortValues(property.GetValue(left), property.GetValue(right)));
-                rows = _sortDirection == ListSortDirection.Ascending
-                    ? rows.OrderBy(row => row, comparer)
-                    : rows.OrderByDescending(row => row, comparer);
-            }
-        }
-
         var wasLoading = _loading;
         _loading = true;
         try
         {
             // DataGridView 在重置绑定时可能触发 CellValueChanged；排序属于视图操作，不能误标记为未保存修改。
-            ReplaceBindingListContents(_displayRows, rows);
-            UpdateSortGlyph();
+            foreach (var state in _gridStates.Values)
+            {
+                IEnumerable<TitleBlockRow> rows = _rows.Where(x => x.IsAttributeBased == state.IsAttributeTab);
+                if (state.SortColumnIndex >= 0 && state.SortColumnIndex < state.Grid.Columns.Count)
+                {
+                    var propertyName = state.Grid.Columns[state.SortColumnIndex].DataPropertyName;
+                    var property = TypeDescriptor.GetProperties(typeof(TitleBlockRow))[propertyName];
+                    if (property != null)
+                    {
+                        var comparer = Comparer<TitleBlockRow>.Create((left, right) =>
+                            CompareSortValues(property.GetValue(left), property.GetValue(right)));
+                        rows = state.SortDirection == ListSortDirection.Ascending
+                            ? rows.OrderBy(row => row, comparer)
+                            : rows.OrderByDescending(row => row, comparer);
+                    }
+                }
+
+                ReplaceBindingListContents(state.DisplayRows, rows);
+                UpdateSortGlyph(state);
+            }
         }
         finally
         {
@@ -496,17 +577,17 @@ public sealed class TitleBlockLibraryManagerForm : Form
             : string.Compare(left.ToString(), right.ToString(), StringComparison.CurrentCultureIgnoreCase);
     }
 
-    private void UpdateSortGlyph()
+    private void UpdateSortGlyph(GridState state)
     {
-        foreach (DataGridViewColumn column in _grid.Columns)
+        foreach (DataGridViewColumn column in state.Grid.Columns)
         {
             column.HeaderCell.SortGlyphDirection = SortOrder.None;
         }
 
-        if (_sortColumnIndex >= 0 && _sortColumnIndex < _grid.Columns.Count)
+        if (state.SortColumnIndex >= 0 && state.SortColumnIndex < state.Grid.Columns.Count)
         {
-            _grid.Columns[_sortColumnIndex].HeaderCell.SortGlyphDirection =
-                _sortDirection == ListSortDirection.Ascending ? SortOrder.Ascending : SortOrder.Descending;
+            state.Grid.Columns[state.SortColumnIndex].HeaderCell.SortGlyphDirection =
+                state.SortDirection == ListSortDirection.Ascending ? SortOrder.Ascending : SortOrder.Descending;
         }
     }
 
@@ -589,13 +670,16 @@ public sealed class TitleBlockLibraryManagerForm : Form
 
     private void RefreshStatus()
     {
-        _status.Text = $"共 {_rows.Count} 个图框定义。双击行或右键选择“编辑”。{(_dirty ? "有未保存修改。" : "")} 配置文件: {TitleBlockLibraryStore.DefaultPath}";
+        var regularCount = _rows.Count(x => !x.IsAttributeBased);
+        var attributeCount = _rows.Count - regularCount;
+        _status.Text = $"共 {_rows.Count} 个图框定义（常规 {regularCount} / 属性 {attributeCount}）。双击行或右键选择“编辑”。{(_dirty ? "有未保存修改。" : "")} 配置文件: {TitleBlockLibraryStore.DefaultPath}";
     }
 
     private bool TryBuildLibrary(out TitleBlockLibrary library)
     {
         library = new TitleBlockLibrary();
-        _grid.EndEdit();
+        _regularGrid.EndEdit();
+        _attributeGrid.EndEdit();
 
         var invalid = _rows.FirstOrDefault(x => string.IsNullOrWhiteSpace(x.BlockName));
         if (invalid != null)
@@ -629,6 +713,7 @@ public sealed class TitleBlockLibraryManagerForm : Form
             return false;
         }
 
+        // 块名在常规/属性两类图框间全局唯一，去重校验覆盖全部行。
         var duplicated = _rows
             .GroupBy(x => x.BlockName.Trim(), StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault(g => g.Count() > 1);
@@ -695,6 +780,8 @@ public sealed class TitleBlockLibraryManagerForm : Form
     private sealed class TitleBlockRow
     {
         public string BlockName { get; set; } = "";
+        /// <summary>是否为属性图框：字段值按关键字从块属性提取，无区域坐标。</summary>
+        public bool IsAttributeBased { get; set; }
         public string PaperName { get; set; } = "";
         public double PaperWidthMm { get; set; }
         public double PaperHeightMm { get; set; }
@@ -740,6 +827,7 @@ public sealed class TitleBlockLibraryManagerForm : Form
             return new TitleBlockRow
             {
                 BlockName = definition.BlockName,
+                IsAttributeBased = definition.IsAttributeBased,
                 PaperName = definition.PaperName,
                 PaperWidthMm = definition.PaperWidthMm,
                 PaperHeightMm = definition.PaperHeightMm,
@@ -787,6 +875,7 @@ public sealed class TitleBlockLibraryManagerForm : Form
             return new TitleBlockDefinition
             {
                 BlockName = BlockName.Trim(),
+                IsAttributeBased = IsAttributeBased,
                 PaperName = PaperName?.Trim() ?? "",
                 PaperWidthMm = PaperWidthMm,
                 PaperHeightMm = PaperHeightMm,

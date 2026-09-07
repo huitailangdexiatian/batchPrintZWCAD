@@ -82,6 +82,7 @@ public static class TitleBlockLibraryStore
         }
         else
         {
+            existing.IsAttributeBased = definition.IsAttributeBased;
             existing.HasPrintRegion = definition.HasPrintRegion;
             existing.CoordinateMode = string.IsNullOrWhiteSpace(definition.CoordinateMode) ? "Local" : definition.CoordinateMode;
             existing.PrintRegion = definition.PrintRegion;

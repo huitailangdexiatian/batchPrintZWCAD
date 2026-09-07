@@ -394,19 +394,37 @@ public static class TitleBlockScanner
                 string info2 = "";
                 try
                 {
-                    var blockTextCache = CadTextExtractor.BuildBlockReferenceTextCache(tr, blockRef);
-                    title = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, titleRegion, ownerTextCache, blockTextCache);
-                    number = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, numberRegion, ownerTextCache, blockTextCache);
-                    if (dateRegion.HasArea())
-                        date = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, dateRegion, ownerTextCache, blockTextCache);
-                    if (revisionRegion.HasArea())
-                        revision = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, revisionRegion, ownerTextCache, blockTextCache);
-                    if (phaseRegion.HasArea())
-                        phase = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, phaseRegion, ownerTextCache, blockTextCache);
-                    if (info1Region.HasArea())
-                        info1 = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, info1Region, ownerTextCache, blockTextCache);
-                    if (info2Region.HasArea())
-                        info2 = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, info2Region, ownerTextCache, blockTextCache);
+                    if (definition.IsAttributeBased)
+                    {
+                        // 属性图框：字段值按关键字从块属性提取，不走区域文字提取。
+                        var attributes = AttributeTitleBlockFieldExtractor.ReadAttributes(tr, blockRef);
+                        var fieldValues = AttributeTitleBlockFieldExtractor.ExtractAllFields(
+                            attributes,
+                            storedSettings.AttributeTitleBlockKeywords);
+                        title = fieldValues["Title"];
+                        number = fieldValues["DrawingNumber"];
+                        date = fieldValues["Date"];
+                        revision = fieldValues["Revision"];
+                        phase = fieldValues["Phase"];
+                        info1 = fieldValues["Info1"];
+                        info2 = fieldValues["Info2"];
+                    }
+                    else
+                    {
+                        var blockTextCache = CadTextExtractor.BuildBlockReferenceTextCache(tr, blockRef);
+                        title = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, titleRegion, ownerTextCache, blockTextCache);
+                        number = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, numberRegion, ownerTextCache, blockTextCache);
+                        if (dateRegion.HasArea())
+                            date = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, dateRegion, ownerTextCache, blockTextCache);
+                        if (revisionRegion.HasArea())
+                            revision = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, revisionRegion, ownerTextCache, blockTextCache);
+                        if (phaseRegion.HasArea())
+                            phase = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, phaseRegion, ownerTextCache, blockTextCache);
+                        if (info1Region.HasArea())
+                            info1 = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, info1Region, ownerTextCache, blockTextCache);
+                        if (info2Region.HasArea())
+                            info2 = CadTextExtractor.ExtractRegionText(tr, blockRef, owner, info2Region, ownerTextCache, blockTextCache);
+                    }
                 }
                 catch (Exception ex)
                 {
