@@ -36,21 +36,15 @@ namespace ZwcadBatchPlot;
 
 public static partial class PlotterService
 {
-    /** ResolvePlotRotation：解析最终打印旋转；PNG/JPG 恒 0，PDF 走窗口横竖兜底。 */
+    /** ResolvePlotRotation：解析最终打印旋转；PNG/JPG 与 PDF 共用窗口横竖兜底。 */
     private static PlotRotation ResolvePlotRotation(
         string deviceName,
         PlotRotation paperRotation,
         PlotJob job,
         Extents2d window)
     {
-        // PNG/JPG 出图方向由「与图框同向的像素纸型」保证（见 ChooseMedia 同向优先），
-        // 恒用 0 旋转，不依赖光栅驱动的 plot rotation（DWG TO PNG/JPG 上易被忽略或
-        // 在校验阶段回退，导致横向图框输出成纵向画布）。
-        if (IsRasterPlotDevice(deviceName))
-        {
-            return PlotRotation.Degrees000;
-        }
-
+        // PNG/JPG 与 PDF 同一套旋转判断：介质 PreferredRotation + 窗口横竖兜底。
+        _ = deviceName;
         return ResolveWindowRotation(paperRotation, job, window);
     }
 

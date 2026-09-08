@@ -327,8 +327,6 @@ public static class AcadPlotterInstaller
             }
         }
 
-        return papers;
-
         static string PaperKey(RasterPaperSpec paper)
         {
             return paper.WidthPixels + "x" + paper.HeightPixels;

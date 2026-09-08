@@ -117,12 +117,7 @@ public static partial class PlotterService
         var errors = new List<string>();
 
         var preferredRotation = ResolvePlotRotation(deviceName, media.PreferredRotation, job, window);
-        // 栅格纸型已与图框同向，方向由纸型保证，仅以 0 旋转提交；
-        // 禁止旋转 fallback（如 90° 校验失败回退 0°），否则会把同向纸转成反向画布。
-        var rotations = IsRasterPlotDevice(deviceName)
-            ? new[] { PlotRotation.Degrees000 }
-            : RotationOrder(preferredRotation).ToArray();
-        foreach (var rotation in rotations)
+        foreach (var rotation in RotationOrder(preferredRotation))
         {
             var settings = new PlotSettings(layout.ModelType);
             try

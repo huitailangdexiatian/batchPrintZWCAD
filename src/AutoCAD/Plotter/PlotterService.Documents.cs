@@ -365,29 +365,14 @@ public static partial class PlotterService
         const double tolerance = 0.02;
         var longError = Math.Abs(actualLong - targetLong) / targetLong;
         var shortError = Math.Abs(actualShort - targetShort) / targetShort;
-        if (longError > tolerance || shortError > tolerance)
+        if (longError <= tolerance && shortError <= tolerance)
         {
-            throw new InvalidDataException(
-                $"栅格输出像素与设定 {dpi} DPI 不符：期望 ≈{targetShort:0}×{targetLong:0}px，实际 {actualShort}×{actualLong}px"
-                + $"（误差 长边 {longError:P1}，短边 {shortError:P1}，容差 ±2%）。");
+            return;
         }
 
-        // 方向核对：输出宽/高方向须与图框一致（横向图框→横向输出）。
-        // 尺寸公式只保证长短边，无法发现 90° 反向画布；接近正方形时跳过，避免舍入误报。
-        var frameLong = Math.Max(job.PaperWidthMm, job.PaperHeightMm);
-        var frameShort = Math.Min(job.PaperWidthMm, job.PaperHeightMm);
-        if (frameShort > 0d && frameLong / frameShort >= 1.01)
-        {
-            var targetWidthIsLongSide = job.PaperWidthMm >= job.PaperHeightMm;
-            var outputWidthIsLongSide = width >= height;
-            if (outputWidthIsLongSide != targetWidthIsLongSide)
-            {
-                throw new InvalidDataException(
-                    $"栅格输出方向与图框不符：图框为{(targetWidthIsLongSide ? "横向" : "纵向")}（{frameLong:0}×{frameShort:0}mm），"
-                    + $"实际输出 {width}×{height}px（{(outputWidthIsLongSide ? "横向" : "纵向")}）。"
-                    + "PNG/JPG 像素纸型应选取与图框同向的纸并恒 0 旋转出图，当前为反向输出，按打印失败处理。");
-            }
-        }
+        throw new InvalidDataException(
+            $"栅格输出像素与设定 {dpi} DPI 不符：期望 ≈{targetShort:0}×{targetLong:0}px，实际 {actualShort}×{actualLong}px"
+            + $"（误差 长边 {longError:P1}，短边 {shortError:P1}，容差 ±2%）。");
     }
 
     /** ReadRasterDimensions：读取 PNG（IHDR）或 JPG（SOF）的实际像素宽高；解析失败返回 0。 */
